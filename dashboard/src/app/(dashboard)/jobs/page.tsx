@@ -1,0 +1,2171 @@
+"use client";
+
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowUpDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  ChevronsLeftIcon,
+  ChevronsRightIcon,
+  ClockIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  FilterIcon,
+  InfoIcon,
+  ListFilterIcon,
+  LoaderCircleIcon,
+  MoreHorizontalIcon,
+  JapaneseYenIcon,
+  PackageIcon,
+  PercentIcon,
+  SparklesIcon,
+  StarIcon,
+  TagsIcon,
+  UsersIcon,
+} from "lucide-react";
+import * as React from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { toast } from "sonner";
+import { formatDistanceToNow } from "date-fns";
+import { ja } from "date-fns/locale";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Switch } from "@/components/ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { motion } from "framer-motion";
+
+import { ClientExtrasInline, LancersClientFeedbackStrip, parseLancersFeedbackCounts, stripLancersFeedbackPhrases } from "@/components/client-extras-inline";
+import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
+import { PostingSourceBadges } from "@/components/posting-source-badges";
+import type { JobLiveStats } from "@/app/api/detected-jobs/[id]/live-stats/route";
+import {
+  JOB_STATUS_LIST,
+  JOB_STATUS_VALUES,
+  jobStatusMeta,
+  statusAllowsAmount,
+  formatYen,
+  type JobStatusValue,
+} from "@/lib/job-status";
+import { parseBudget } from "@/lib/budget";
+import { JOB_KEYWORDS_SETTING_KEY, keywordsFromSettingValue } from "@/lib/job-keywords";
+
+/** Jobs 一覧で個別 ON にしたキーワードの選択状態を保持する localStorage キー。 */
+const KEYWORD_SELECTION_STORAGE_KEY = "jobs:selectedKeywords";
+
+/**
+ * Jobs 一覧の絞り込み・並び替え・ページングの状態。
+ * すべて URL クエリに反映し、その URL を開けば同じ表示を再現できる。
+ */
+type JobsFilters = {
+  q: string;
+  boardPf: "" | "lw" | "cw";
+  boardCat: "" | "system" | "web" | "ai";
+  statusFilter: JobStatusValue[];
+  selectedKeywords: string[];
+  /** 見積（予算）レンジ（円）。空文字 = 未指定。 */
+  budgetMin: string;
+  budgetMax: string;
+  /** 金額不明（応相談・要確認）案件を含めるか。既定 true。 */
+  budgetIncludeUnknown: boolean;
+  sort: "" | "posted";
+  page: number;
+  pageSize: number;
+};
+
+const DEFAULT_PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const STATUS_VALUE_SET = new Set<string>(JOB_STATUS_VALUES);
+
+/** URL の searchParams から絞り込み状態を復元する（不正値は既定値にフォールバック）。 */
+function parseFiltersFromParams(sp: URLSearchParams): JobsFilters {
+  const boardPfRaw = sp.get("boardPf");
+  const boardPf: JobsFilters["boardPf"] =
+    boardPfRaw === "lw" || boardPfRaw === "cw" ? boardPfRaw : "";
+
+  const boardCatRaw = sp.get("boardCat");
+  const boardCat: JobsFilters["boardCat"] =
+    boardCatRaw === "system" || boardCatRaw === "web" || boardCatRaw === "ai"
+      ? boardCatRaw
+      : "";
+
+  const statusFilter = (sp.get("status") ?? "")
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => STATUS_VALUE_SET.has(s)) as JobStatusValue[];
+
+  const selectedKeywords = (sp.get("keywords") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  // 数値（円）だけ取り出す。不正値は空文字（未指定）に。
+  const yen = (raw: string | null): string => {
+    if (!raw) return "";
+    const digits = raw.replace(/[^\d]/g, "");
+    return digits;
+  };
+  const budgetMin = yen(sp.get("budgetMin"));
+  const budgetMax = yen(sp.get("budgetMax"));
+  // 既定は含める（true）。URL に budgetIncludeUnknown=0/false/off のときだけ false。
+  const budgetIncludeUnknown = !["0", "false", "off"].includes(
+    (sp.get("budgetIncludeUnknown") ?? "").trim().toLowerCase(),
+  );
+
+  const sort: JobsFilters["sort"] = sp.get("sort") === "posted" ? "posted" : "";
+
+  const pageRaw = parseInt(sp.get("page") ?? "1", 10);
+  const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
+
+  const sizeRaw = parseInt(sp.get("limit") ?? String(DEFAULT_PAGE_SIZE), 10);
+  const pageSize = PAGE_SIZE_OPTIONS.includes(sizeRaw) ? sizeRaw : DEFAULT_PAGE_SIZE;
+
+  return {
+    q: sp.get("q")?.trim() ?? "",
+    boardPf,
+    boardCat,
+    statusFilter,
+    selectedKeywords,
+    budgetMin,
+    budgetMax,
+    budgetIncludeUnknown,
+    sort,
+    page,
+    pageSize,
+  };
+}
+
+/** 絞り込み状態を URL/API 共通のクエリ文字列に変換する（既定値は省略してURLを短く保つ）。 */
+function buildQueryString(f: JobsFilters): string {
+  const u = new URLSearchParams();
+  if (f.q.trim()) u.set("q", f.q.trim());
+  if (f.boardPf) u.set("boardPf", f.boardPf);
+  if (f.boardCat) u.set("boardCat", f.boardCat);
+  if (f.statusFilter.length > 0) u.set("status", f.statusFilter.join(","));
+  if (f.selectedKeywords.length > 0) u.set("keywords", f.selectedKeywords.join(","));
+  if (f.budgetMin.trim()) u.set("budgetMin", f.budgetMin.trim());
+  if (f.budgetMax.trim()) u.set("budgetMax", f.budgetMax.trim());
+  // 見積フィルタ適用中に「金額不明を除外」のときだけ URL に出す（既定 true は省略）。
+  const budgetActive = Boolean(f.budgetMin.trim() || f.budgetMax.trim());
+  if (budgetActive && !f.budgetIncludeUnknown) u.set("budgetIncludeUnknown", "0");
+  if (f.sort) u.set("sort", f.sort);
+  if (f.page > 1) u.set("page", String(f.page));
+  if (f.pageSize !== DEFAULT_PAGE_SIZE) u.set("limit", String(f.pageSize));
+  return u.toString();
+}
+
+type ClientListingMeta = {
+  ordersText: string | null;
+  rating: number | null;
+  extrasLine: string | null;
+};
+
+type JobRow = {
+  id: string;
+  title: string;
+  description: string;
+  budget: string;
+  clientName: string;
+  clientProfileUrl?: string | null;
+  clientOrders?: string | null;
+  clientRating?: number | null;
+  clientExtrasSummary?: string | null;
+  clientAvatarUrl?: string | null;
+  projectUrl: string;
+  postedAt: string | null;
+  detectedAt: string;
+  status: JobStatusValue;
+  appliedAmount: number | null;
+  tags: string[];
+  notificationSent: boolean;
+  platform: string;
+  sourceUrl: string;
+  notificationStatus: string;
+  rawData: unknown;
+};
+
+type JobsListPayload = {
+  jobs: JobRow[];
+  total: number;
+  page: number;
+  limit: number;
+  freshInWindow: number;
+  totalPages: number;
+  keywordFilter: { active: boolean; keywords: string[]; saved: string[] };
+  budgetFilter: {
+    active: boolean;
+    min: number | null;
+    max: number | null;
+    includeUnknown: boolean;
+  };
+};
+
+type RowStats = JobLiveStats | { loading: true } | { error: string };
+
+function getRawRecord(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== "object") return null;
+  return raw as Record<string, unknown>;
+}
+
+/**
+ * Monitor ``job_public_dict`` uses snake_case. Merge camelCase aliases so ingested/transformed JSON still renders.
+ */
+function bridgedMonitorRaw(raw: unknown): Record<string, unknown> | null {
+  const r = getRawRecord(raw);
+  if (!r) return null;
+
+  const detailRaw = r.detail_url ?? r.detailUrl;
+  const detail_url =
+    typeof detailRaw === "string" && detailRaw.trim() ? detailRaw.trim() : undefined;
+
+  const nameRaw = r.client_name ?? r.clientName;
+  const client_name =
+    typeof nameRaw === "string" && nameRaw.trim() ? nameRaw.trim() : undefined;
+
+  const ordersRaw = r.client_orders ?? r.clientOrders;
+  const client_orders =
+    ordersRaw != null && String(ordersRaw).trim() ? String(ordersRaw).trim() : undefined;
+
+  const ratingRaw = r.client_rating ?? r.clientRating;
+  let client_rating: number | undefined;
+  if (typeof ratingRaw === "number" && !Number.isNaN(ratingRaw)) client_rating = ratingRaw;
+
+  const extrasRaw = r.client_extras ?? r.clientExtras;
+  const client_extras =
+    typeof extrasRaw === "string" && extrasRaw.trim() ? extrasRaw.trim().replace(/\s+/g, " ") : undefined;
+
+  const profileRaw = r.client_profile_url ?? r.clientProfileUrl;
+  const client_profile_url =
+    typeof profileRaw === "string" && profileRaw.trim() ? profileRaw.trim() : undefined;
+
+  const avatarRaw = r.client_avatar_url ?? r.clientAvatarUrl;
+  const client_avatar_url =
+    typeof avatarRaw === "string" && avatarRaw.trim() ? avatarRaw.trim() : undefined;
+
+  return {
+    ...r,
+    ...(detail_url !== undefined ? { detail_url } : {}),
+    ...(client_name !== undefined ? { client_name } : {}),
+    ...(client_orders !== undefined ? { client_orders } : {}),
+    ...(client_rating !== undefined ? { client_rating } : {}),
+    ...(client_extras !== undefined ? { client_extras } : {}),
+    ...(client_profile_url !== undefined ? { client_profile_url } : {}),
+    ...(client_avatar_url !== undefined ? { client_avatar_url } : {}),
+  };
+}
+
+
+
+/** Monitor `job_public_dict` uses snake_case (client_name, …). */
+function clientNameFromRaw(raw: unknown): string | null {
+  const r = bridgedMonitorRaw(raw);
+  if (!r) return null;
+  const n = r.client_name;
+  if (typeof n === "string" && n.trim()) return n.trim();
+  return null;
+}
+
+function extractOrdersFromExtras(extras: string): string | null {
+  const m = extras.match(/発注\s*(\d+)/);
+  return m?.[1] ?? null;
+}
+
+function extractRatingFromExtras(extras: string): number | null {
+  const m = extras.match(/評価\s*([\d.,]+)/);
+  if (!m?.[1]) return null;
+  const n = parseFloat(m[1]!.replace(",", "."));
+  return Number.isNaN(n) ? null : n;
+}
+
+/** Remove duplicate 発注/評価 fragments so we do not repeat chips in the subtitle. */
+function extrasLineAfterChips(extras: string, ordersText: string | null, rating: number | null): string | null {
+  let t = sanitizeClientExtrasText(extras.trim()).replace(/\s+/g, " ");
+  if (!t) return null;
+
+  // Drop "発注 N" if chip shows the same count
+  if (ordersText) {
+    t = t
+      .replace(new RegExp(`発注\\s*${ordersText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "g"), " ")
+      .replace(/\s*\/\s*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  if (rating != null) {
+    const r1 = rating.toFixed(1);
+    const r0 = String(rating % 1 === 0 ? Math.round(rating) : rating);
+    t = t
+      .replace(new RegExp(`評価\\s*${r1.replace(".", "\\.")}`, "g"), " ")
+      .replace(new RegExp(`評価\\s*${r0.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "g"), " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+  t = t.replace(/^[/｜|]\s*/, "").replace(/\s*[/｜|]\s*$/g, "").trim();
+  const maxExtras = 200;
+  if (t.length < 2) return null;
+  return t.length > maxExtras ? `${t.slice(0, maxExtras - 1)}…` : t;
+}
+
+function isRedundantLancersExtras(extras: string, ordersText: string | null, rating: number | null): boolean {
+  if (!ordersText || rating == null || !extras.trim()) return false;
+  const rLabel = rating % 1 === 0 ? String(rating) : rating.toFixed(1);
+  const escapedO = ordersText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escapedR = rLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const hasO = new RegExp(`発注\\s*${escapedO}`, "u").test(extras);
+  const hasR = new RegExp(`評価\\s*${escapedR}`, "u").test(extras);
+  return hasO && hasR && extras.length < 120;
+}
+
+function parseClientListingMeta(raw: unknown): ClientListingMeta | null {
+  const r = bridgedMonitorRaw(raw);
+  if (!r) return null;
+
+  let ordersText: string | null = null;
+  if (r.client_orders != null && String(r.client_orders).trim()) {
+    ordersText = String(r.client_orders).trim();
+  }
+
+  let rating: number | null = null;
+  if (typeof r.client_rating === "number" && !Number.isNaN(r.client_rating)) {
+    rating = r.client_rating;
+  }
+
+  const exRaw =
+    typeof r.client_extras === "string" ? r.client_extras.trim().replace(/\s+/g, " ") : "";
+  if (!ordersText && exRaw) {
+    const fromEx = extractOrdersFromExtras(exRaw);
+    if (fromEx) ordersText = fromEx;
+  }
+  if (rating == null && exRaw) {
+    const fromEx = extractRatingFromExtras(exRaw);
+    if (fromEx != null) rating = fromEx;
+  }
+
+  let extrasLine: string | null = null;
+  if (exRaw) {
+    const cleaned = exRaw;
+    if (!isRedundantLancersExtras(cleaned, ordersText, rating)) {
+      extrasLine = extrasLineAfterChips(cleaned, ordersText, rating);
+    }
+  }
+
+  if (!ordersText && rating == null && !extrasLine) return null;
+  return { ordersText, rating, extrasLine };
+}
+
+/** Prefer structured columns persisted from ingest; fall back to ``rawData`` parsing. */
+function parseClientListingMetaMerged(job: JobRow): ClientListingMeta | null {
+  const rawMeta = parseClientListingMeta(job.rawData);
+
+  let ordersText =
+    job.clientOrders != null && String(job.clientOrders).trim()
+      ? String(job.clientOrders).trim()
+      : null;
+  let rating =
+    typeof job.clientRating === "number" && Number.isFinite(job.clientRating)
+      ? job.clientRating
+      : null;
+
+  if (!ordersText && rawMeta?.ordersText) ordersText = rawMeta.ordersText;
+  if (rating == null && rawMeta?.rating != null) rating = rawMeta.rating;
+
+  const storedExtras =
+    typeof job.clientExtrasSummary === "string"
+      ? job.clientExtrasSummary.trim().replace(/\s+/g, " ")
+      : "";
+
+  let extrasLine: string | null = null;
+  if (storedExtras) {
+    if (!isRedundantLancersExtras(storedExtras, ordersText, rating)) {
+      extrasLine = extrasLineAfterChips(storedExtras, ordersText, rating);
+    }
+  }
+  if (!extrasLine && rawMeta?.extrasLine) extrasLine = rawMeta.extrasLine;
+
+  if (!ordersText && rating == null && !extrasLine) {
+    if (!hasJobClientSignals(job)) return null;
+    return { ordersText: null, rating: null, extrasLine: null };
+  }
+  return { ordersText, rating, extrasLine };
+}
+
+/** プラットフォーム別にチップを常時出すため、メタが空でも LW/CW 行では空メタを返す。 */
+function clientStripMeta(job: JobRow): ClientListingMeta | null {
+  const m = parseClientListingMetaMerged(job);
+  if (m) return m;
+  if (isLancersPlatformJob(job) || isCrowdWorksJob(job)) {
+    return { ordersText: null, rating: null, extrasLine: null };
+  }
+  return null;
+}
+
+function hasJobClientSignals(job: JobRow): boolean {
+  if (job.clientName?.trim()) return true;
+  if (typeof job.clientProfileUrl === "string" && job.clientProfileUrl.trim()) return true;
+  if (typeof job.clientOrders === "string" && job.clientOrders.trim()) return true;
+  if (job.clientRating != null && Number.isFinite(job.clientRating)) return true;
+  if (typeof job.clientExtrasSummary === "string" && job.clientExtrasSummary.trim()) return true;
+  const r = bridgedMonitorRaw(job.rawData);
+  if (!r) return false;
+  if (typeof r.client_name === "string" && r.client_name.trim()) return true;
+  if (typeof r.client_profile_url === "string" && r.client_profile_url.trim()) return true;
+  if (r.client_orders != null && String(r.client_orders).trim()) return true;
+  if (typeof r.client_rating === "number" && !Number.isNaN(r.client_rating)) return true;
+  if (typeof r.client_extras === "string" && r.client_extras.trim()) return true;
+  return false;
+}
+
+function isCrowdWorksJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData">): boolean {
+  const p = job.platform?.toLowerCase() ?? "";
+  if (p.includes("crowd")) return true;
+  const du = bridgedMonitorRaw(job.rawData)?.detail_url ?? job.projectUrl;
+  return typeof du === "string" && du.toLowerCase().includes("crowdworks.jp");
+}
+
+function isLancersPlatformJob(job: Pick<JobRow, "platform" | "projectUrl" | "rawData">): boolean {
+  if (isCrowdWorksJob(job)) return false;
+  const p = job.platform?.toLowerCase() ?? "";
+  if (p.includes("lancer")) return true;
+  const u = ((bridgedMonitorRaw(job.rawData)?.detail_url as string | undefined) ?? job.projectUrl ?? "").toLowerCase();
+  return u.includes("lancers.jp");
+}
+
+/** DB の補足 + raw の client_extras を結合（発注率・完了率などの抽出用）。 */
+function clientExtrasHaystack(job: JobRow): string {
+  const parts: string[] = [];
+  if (typeof job.clientExtrasSummary === "string" && job.clientExtrasSummary.trim()) {
+    parts.push(job.clientExtrasSummary.trim().replace(/\s+/g, " "));
+  }
+  const r = bridgedMonitorRaw(job.rawData);
+  if (typeof r?.client_extras === "string" && r.client_extras.trim()) {
+    parts.push(r.client_extras.trim().replace(/\s+/g, " "));
+  }
+  return parts.join(" · ").replace(/\s+/g, " ").trim();
+}
+
+/** ランサーズ補足の「発注率 …」断片。無い・未計算は "—"。 */
+function lancersOrderRateChipFromHaystack(haystack: string): string {
+  const norm = haystack.replace(/\s+/g, " ");
+  const key = "発注率";
+  const i = norm.indexOf(key);
+  if (i === -1) return "—";
+  const rest = norm.slice(i + key.length).trim();
+  const seg = rest.split("·")[0]?.trim() ?? "";
+  if (!seg) return "—";
+  if (/^([-—.—]+|%)$/.test(seg) || /^[-—.—]+%$/u.test(seg) || seg.startsWith("---")) return "—";
+  return seg;
+}
+
+/** 補足プレビューから発注率行を除き、チップと重複させない。 */
+function stripLancersOrderRateSegment(extrasPreview: string): string {
+  const norm = extrasPreview.replace(/\s+/g, " ").trim();
+  const key = "発注率";
+  const i = norm.indexOf(key);
+  if (i === -1) return norm;
+  const before = norm.slice(0, i).trim();
+  const rest = norm.slice(i + key.length).trim();
+  let after = "";
+  if (rest.includes("·")) {
+    after = rest
+      .split("·")
+      .slice(1)
+      .join("·")
+      .trim();
+  }
+  const merged = [before, after].filter(Boolean).join(" · ").replace(/\s+/g, " ").trim();
+  return merged.length ? merged : "";
+}
+
+/** CrowdWorks 補足の完了率「N%」。 */
+function crowdworksCompletionRateChipFromHaystack(haystack: string): string {
+  const norm = haystack.replace(/\s+/g, " ");
+  const m = norm.match(/完了率\s*(\d{1,3}%)/u);
+  if (m?.[1]) return m[1];
+  return "—";
+}
+
+/** 補足プレビューから「完了率 N%」を除く。 */
+function stripCrowdworksCompletionSegment(extrasPreview: string): string {
+  const norm = extrasPreview.replace(/\s+/g, " ").trim();
+  const replaced = norm.replace(/\s*完了率\s*\d{1,3}%\s*/u, " ").replace(/\s+/g, " ").trim();
+  return replaced.length ? replaced : "";
+}
+
+/** Five stars on a 0–5 scale — supports fractional fill on the last active star. */
+function ClientRatingStars({ value }: { value: number }) {
+  const clamped = Math.max(0, Math.min(5, value));
+
+  return (
+    <span className="inline-flex items-center gap-px" title={`評価 ${value.toFixed(1)} / 5`}>
+      {[0, 1, 2, 3, 4].map((i) => {
+        const low = i;
+        const high = i + 1;
+        let fillPct = 0;
+        if (clamped >= high) fillPct = 100;
+        else if (clamped > low) fillPct = (clamped - low) * 100;
+        return (
+          <span key={i} className="relative inline-flex size-3.5 shrink-0 overflow-hidden">
+            <StarIcon className="size-3.5 text-zinc-300 dark:text-zinc-600" aria-hidden />
+            {fillPct > 0 ? (
+              <span
+                className="pointer-events-none absolute left-0 top-0 h-full overflow-hidden"
+                style={{ width: `${fillPct}%` }}
+              >
+                <StarIcon className="size-3.5 fill-amber-400 text-amber-400" aria-hidden />
+              </span>
+            ) : null}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+function ClientMetaStrip({ job }: { job: JobRow }) {
+  const meta = clientStripMeta(job);
+  if (!meta) return null;
+
+  const cw = isCrowdWorksJob(job);
+  const lan = isLancersPlatformJob(job);
+  const hay = clientExtrasHaystack(job);
+
+  let extrasLine = meta.extrasLine;
+  if (lan && extrasLine) {
+    extrasLine = stripLancersOrderRateSegment(extrasLine);
+    extrasLine = stripLancersFeedbackPhrases(extrasLine);
+  } else if (cw && extrasLine) {
+    extrasLine = stripCrowdworksCompletionSegment(extrasLine);
+  }
+  if (!extrasLine?.trim()) extrasLine = null;
+
+  const ordersTitle = cw ? "契約数（クライアント）" : "発注数（クライアント）";
+  const ratingTitle = cw ? "総合評価（星）" : "評価（一覧カード）";
+  const ratingDisplay = meta.rating ?? 0;
+  const ordersChip = meta.ordersText?.trim() || "—";
+  const lancersRate = lan ? lancersOrderRateChipFromHaystack(hay) : null;
+  const cwCompletion = cw ? crowdworksCompletionRateChipFromHaystack(hay) : null;
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-1.5 py-0.5 text-[11px] text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+          title={ordersTitle}
+        >
+          <PackageIcon className="size-3 shrink-0 text-zinc-500 dark:text-zinc-400" aria-hidden />
+          <span className="font-medium tabular-nums">{ordersChip}</span>
+        </span>
+        {lan ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-violet-500/35 bg-violet-500/10 px-1.5 py-0.5 text-[11px] text-violet-950 dark:border-violet-500/35 dark:bg-violet-500/15 dark:text-violet-100"
+            title="発注率（クライアント補足・プロフィール由来）"
+          >
+            <PercentIcon className="size-3 shrink-0 text-violet-600 opacity-90 dark:text-violet-300" aria-hidden />
+            <span className="max-w-[6rem] truncate font-medium tabular-nums">{lancersRate}</span>
+          </span>
+        ) : null}
+        {cw ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/35 bg-emerald-500/10 px-1.5 py-0.5 text-[11px] text-emerald-950 dark:border-emerald-500/35 dark:bg-emerald-500/15 dark:text-emerald-50"
+            title="完了率（クライアント補足・プロフィール由来）"
+          >
+            <PercentIcon className="size-3 shrink-0 text-emerald-700 opacity-90 dark:text-emerald-300" aria-hidden />
+            <span className="font-medium tabular-nums">{cwCompletion}</span>
+          </span>
+        ) : null}
+        <span
+          className="inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-950 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-50"
+          title={meta.rating == null ? `${ratingTitle}（データなし · 0.0 として表示）` : ratingTitle}
+        >
+          <ClientRatingStars value={ratingDisplay} />
+          <span className="font-semibold tabular-nums">{ratingDisplay.toFixed(1)}</span>
+        </span>
+      </div>
+      {lan ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="sr-only">フィードバック</span>
+          <LancersClientFeedbackStrip haystack={hay} compact />
+        </div>
+      ) : null}
+      {extrasLine ? (
+        <div
+          className="line-clamp-2 text-[10px] leading-snug text-zinc-500 dark:text-zinc-400"
+          title={extrasLine}
+        >
+          <ClientExtrasInline text={extrasLine} compact className="text-zinc-500 dark:text-zinc-400" />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function resolveClientProfileUrl(job: JobRow): string | null {
+  const db = typeof job.clientProfileUrl === "string" ? job.clientProfileUrl.trim() : "";
+  if (db) {
+    const s = db;
+    if (s.startsWith("http://") || s.startsWith("https://")) return s;
+    const base = job.platform === "CrowdWorks" ? "https://crowdworks.jp" : "https://www.lancers.jp";
+    return `${base}${s.startsWith("/") ? "" : "/"}${s}`;
+  }
+  const r = bridgedMonitorRaw(job.rawData);
+  if (!r) return null;
+  const u = r.client_profile_url;
+  if (typeof u !== "string" || !u.trim()) return null;
+  const s = u.trim();
+  if (s.startsWith("http://") || s.startsWith("https://")) return s;
+  const base = job.platform === "CrowdWorks" ? "https://crowdworks.jp" : "https://www.lancers.jp";
+  return `${base}${s.startsWith("/") ? "" : "/"}${s}`;
+}
+
+function ClientCell({ job }: { job: JobRow }) {
+  const displayName = (job.clientName?.trim() || clientNameFromRaw(job.rawData) || "").trim();
+  const metaPlain = React.useMemo(() => {
+    const m = clientStripMeta(job);
+    if (!m) return null;
+    const bits: string[] = [];
+    const cw = isCrowdWorksJob(job);
+    const lan = isLancersPlatformJob(job);
+    const hay = clientExtrasHaystack(job);
+
+    bits.push(`${cw ? "契約" : "発注"} ${m.ordersText?.trim() || "—"}`);
+    if (lan) bits.push(`発注率 ${lancersOrderRateChipFromHaystack(hay)}`);
+    if (cw) bits.push(`完了率 ${crowdworksCompletionRateChipFromHaystack(hay)}`);
+    bits.push(`${cw ? "総合評価" : "評価"} ${m.rating ?? 0}`);
+    if (lan) {
+      const fb = parseLancersFeedbackCounts(hay);
+      bits.push(
+        fb ? `フィードバック 良${fb.good}・悪${fb.bad}` : "フィードバック 未取得",
+      );
+    }
+
+    let ex = m.extrasLine;
+    if (ex) {
+      if (lan) {
+        ex = stripLancersOrderRateSegment(ex);
+        ex = stripLancersFeedbackPhrases(ex);
+      } else if (cw) ex = stripCrowdworksCompletionSegment(ex);
+      if (ex.trim()) bits.push(ex);
+    }
+    return bits.length ? bits.join(" · ") : null;
+  }, [job]);
+  const profileUrl = resolveClientProfileUrl(job);
+  const hasName = Boolean(displayName);
+  const fullTitle = [displayName || null, metaPlain].filter(Boolean).join(" — ") || undefined;
+
+  return (
+    <TableCell className="max-w-[min(260px,32vw)] align-top">
+      <div className="flex flex-col gap-1">
+        {profileUrl ? (
+          <a
+            href={profileUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="truncate text-sm font-medium text-sky-700 underline decoration-sky-700/30 underline-offset-2 hover:text-sky-600 hover:decoration-sky-600 dark:text-sky-400 dark:decoration-sky-500/40 dark:hover:text-sky-300"
+            title={fullTitle}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {displayName || "クライアントプロフィール"}
+          </a>
+        ) : hasName ? (
+          <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100" title={fullTitle}>
+            {displayName}
+          </span>
+        ) : (
+          <span className="text-sm text-zinc-400">—</span>
+        )}
+        <ClientMetaStrip job={job} />
+      </div>
+    </TableCell>
+  );
+}
+
+const NEW_MS = 2 * 3600 * 1000;
+
+function DetectedJobsPaginationBar(props: {
+  rangeStart: number;
+  rangeEnd: number;
+  total: number;
+  currentPage: number;
+  totalPages: number;
+  pageSize: number;
+  setPage: React.Dispatch<React.SetStateAction<number>>;
+  setPageSize: React.Dispatch<React.SetStateAction<number>>;
+}) {
+  const { rangeStart, rangeEnd, total, currentPage, totalPages, pageSize, setPage, setPageSize } = props;
+  const atFirst = currentPage <= 1;
+  const atLast = currentPage >= totalPages || totalPages < 1;
+
+  return (
+    <div className="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800 sm:flex-row sm:items-center sm:justify-between">
+      <p className="text-sm text-zinc-600 dark:text-zinc-400">
+        <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{rangeStart}</span>
+        <span className="mx-1">–</span>
+        <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{rangeEnd}</span>
+        <span className="text-zinc-500"> of </span>
+        <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">{total}</span>
+        <span className="text-zinc-500"> results</span>
+      </p>
+
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <nav className="flex items-center gap-0.5 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 shadow-sm dark:border-zinc-700 dark:bg-zinc-900/80" aria-label="Table pagination">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8"
+                disabled={atFirst || total === 0}
+                onClick={() => setPage(1)}
+                aria-label="First page"
+              >
+                <ChevronsLeftIcon className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">First page</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8"
+                disabled={atFirst || total === 0}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="Previous page"
+              >
+                <ChevronLeftIcon className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Previous page</TooltipContent>
+          </Tooltip>
+
+          <span className="min-w-[6.5rem] px-1 text-center text-xs tabular-nums text-zinc-600 dark:text-zinc-300">
+            <span className="font-medium text-zinc-900 dark:text-zinc-100">{currentPage}</span>
+            <span className="text-zinc-500"> / </span>
+            <span className="font-medium text-zinc-900 dark:text-zinc-100">{Math.max(1, totalPages)}</span>
+          </span>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8"
+                disabled={atLast || total === 0}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                aria-label="Next page"
+              >
+                <ChevronRightIcon className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Next page</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                className="size-8"
+                disabled={atLast || total === 0}
+                onClick={() => setPage(totalPages)}
+                aria-label="Last page"
+              >
+                <ChevronsRightIcon className="size-4" aria-hidden />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Last page</TooltipContent>
+          </Tooltip>
+        </nav>
+
+        <Separator orientation="vertical" className="hidden h-7 sm:block" />
+
+        <div className="flex items-center gap-2">
+          <label htmlFor="jobs-page-size" className="whitespace-nowrap text-xs text-zinc-500">
+            Per page
+          </label>
+          <Select
+            value={String(pageSize)}
+            onValueChange={(v) => {
+              setPageSize(Number(v));
+              setPage(1);
+            }}
+          >
+            <SelectTrigger id="jobs-page-size" className="h-8 w-[84px] text-xs" aria-label="Rows per page">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" sideOffset={4}>
+              {[10, 20, 50, 100].map((n) => (
+                <SelectItem key={n} value={String(n)}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function JobsPageInner() {
+  const qc = useQueryClient();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+
+  // URL を絞り込み状態の source of truth とする。初期値は現在の URL から復元。
+  // ``keywords`` は URL に無い場合のみ localStorage の選択を初期値として採用する。
+  const initialFilters = React.useMemo(() => {
+    const sp = new URLSearchParams(searchParams?.toString() ?? "");
+    const parsed = parseFiltersFromParams(sp);
+    if (!sp.has("keywords") && typeof window !== "undefined") {
+      try {
+        const raw = window.localStorage.getItem(KEYWORD_SELECTION_STORAGE_KEY);
+        if (raw) {
+          const stored = JSON.parse(raw);
+          if (Array.isArray(stored)) {
+            parsed.selectedKeywords = stored.filter(
+              (x): x is string => typeof x === "string",
+            );
+          }
+        }
+      } catch {
+        // 破損データは無視（全 OFF のまま）。
+      }
+    }
+    return parsed;
+    // 初期化は初回マウントのみ。以降の URL 変化は明示的な戻る/進む操作で扱う。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const [q, setQ] = React.useState(initialFilters.q);
+  const [boardPf, setBoardPf] = React.useState<"" | "lw" | "cw">(initialFilters.boardPf);
+  const [boardCat, setBoardCat] = React.useState<"" | "system" | "web" | "ai">(initialFilters.boardCat);
+  const [statusFilter, setStatusFilter] = React.useState<JobStatusValue[]>(
+    initialFilters.statusFilter,
+  );
+  // 設定済みキーワードのうち、個別に ON にしたもの（OR 一致で絞り込む）。
+  // 初期状態は URL → localStorage の順で復元。選択は URL と localStorage 両方に保存する。
+  const [selectedKeywords, setSelectedKeywords] = React.useState<string[]>(
+    initialFilters.selectedKeywords,
+  );
+  // 見積（予算）レンジ（円）。空文字 = 未指定。
+  const [budgetMin, setBudgetMin] = React.useState(initialFilters.budgetMin);
+  const [budgetMax, setBudgetMax] = React.useState(initialFilters.budgetMax);
+  // 金額不明（応相談・要確認）案件を含めるか。既定 true。
+  const [budgetIncludeUnknown, setBudgetIncludeUnknown] = React.useState(
+    initialFilters.budgetIncludeUnknown,
+  );
+  const [sort, setSort] = React.useState<"" | "posted">(initialFilters.sort);
+  const [page, setPage] = React.useState(initialFilters.page);
+  const [pageSize, setPageSize] = React.useState(initialFilters.pageSize);
+  const [selected, setSelected] = React.useState<Record<string, boolean>>({});
+  const [detail, setDetail] = React.useState<JobRow | null>(null);
+  const [liveStatsMap, setLiveStatsMap] = React.useState<Record<string, RowStats>>({});
+  const [bulkFetching, setBulkFetching] = React.useState(false);
+  // ステータス変更を即時反映するためのローカルオーバーレイ（再フェッチで上書きされる）
+  const [statusOverrides, setStatusOverrides] = React.useState<Record<string, JobStatusValue>>({});
+  // 応募見積もり金額の即時反映用オーバーレイ
+  const [amountOverrides, setAmountOverrides] = React.useState<Record<string, number | null>>({});
+
+  // 設定ページで登録済みのキーワード一覧（個別トグルの選択肢）。
+  const savedKeywordsQuery = useQuery({
+    queryKey: ["job-keywords"],
+    queryFn: async () => {
+      const res = await fetch("/api/settings", { cache: "no-store" });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error.message);
+      const rows = json.data.settings as { key: string; value: unknown }[];
+      const row = rows.find((r) => r.key === JOB_KEYWORDS_SETTING_KEY);
+      return keywordsFromSettingValue(row?.value);
+    },
+  });
+  const savedKeywords = React.useMemo(
+    () => savedKeywordsQuery.data ?? [],
+    [savedKeywordsQuery.data],
+  );
+
+  // 設定が変わって存在しなくなったキーワードは選択から外す（保存値と同期）。
+  React.useEffect(() => {
+    if (!savedKeywordsQuery.isSuccess) return;
+    const savedLower = new Set(savedKeywords.map((k) => k.toLowerCase()));
+    setSelectedKeywords((prev) => {
+      const pruned = prev.filter((k) => savedLower.has(k.toLowerCase()));
+      return pruned.length === prev.length ? prev : pruned;
+    });
+  }, [savedKeywords, savedKeywordsQuery.isSuccess]);
+
+  // 選択状態を localStorage に永続化。
+  React.useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        KEYWORD_SELECTION_STORAGE_KEY,
+        JSON.stringify(selectedKeywords),
+      );
+    } catch {
+      // 保存できなくても致命的ではない。
+    }
+  }, [selectedKeywords]);
+
+  const toggleKeyword = (kw: string, on: boolean) => {
+    setSelectedKeywords((prev) => {
+      const without = prev.filter((k) => k.toLowerCase() !== kw.toLowerCase());
+      return on ? [...without, kw] : without;
+    });
+  };
+
+  // 絞り込み条件（ページ・ページサイズ以外）が変わったら 1 ページ目に戻し、行ごとの一時状態をリセット。
+  // 初回マウント時（URL から復元した page をそのまま使う）は実行しない。
+  const didMountRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
+    setPage(1);
+    setLiveStatsMap({});
+    setStatusOverrides({});
+    setAmountOverrides({});
+  }, [q, boardPf, boardCat, statusFilter, selectedKeywords, budgetMin, budgetMax, budgetIncludeUnknown, sort]);
+
+  const handleBulkLiveStats = async () => {
+    if (bulkFetching || listJobs.length === 0) return;
+    setBulkFetching(true);
+    setLiveStatsMap((prev) => {
+      const next = { ...prev };
+      for (const job of listJobs) next[job.id] = { loading: true };
+      return next;
+    });
+    const queue = [...listJobs];
+    const worker = async () => {
+      while (queue.length > 0) {
+        const job = queue.shift()!;
+        try {
+          const res = await fetch(`/api/detected-jobs/${job.id}/live-stats`);
+          const json = await res.json();
+          if (!json.ok) throw new Error(json.error.message);
+          setLiveStatsMap((prev) => ({ ...prev, [job.id]: json.data as JobLiveStats }));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "エラー";
+          setLiveStatsMap((prev) => ({ ...prev, [job.id]: { error: msg } }));
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, listJobs.length) }, worker));
+    setBulkFetching(false);
+  };
+
+  // すべての絞り込み状態を 1 つにまとめる（URL・API・同期で共通利用）。
+  const filters = React.useMemo<JobsFilters>(
+    () => ({
+      q,
+      boardPf,
+      boardCat,
+      statusFilter,
+      selectedKeywords,
+      budgetMin,
+      budgetMax,
+      budgetIncludeUnknown,
+      sort,
+      page,
+      pageSize,
+    }),
+    [
+      q,
+      boardPf,
+      boardCat,
+      statusFilter,
+      selectedKeywords,
+      budgetMin,
+      budgetMax,
+      budgetIncludeUnknown,
+      sort,
+      page,
+      pageSize,
+    ],
+  );
+
+  // 見積フィルタのボタン表示ラベル（円を万表記に丸めて短く）。
+  const budgetLabel = React.useMemo(() => {
+    const fmt = (yen: string) => {
+      const n = parseInt(yen, 10);
+      if (!Number.isFinite(n)) return "";
+      return n % 10000 === 0 ? `${n / 10000}万` : `${n.toLocaleString()}`;
+    };
+    const lo = budgetMin ? fmt(budgetMin) : "";
+    const hi = budgetMax ? fmt(budgetMax) : "";
+    if (!lo && !hi) return "見積";
+    if (lo && hi) return `${lo}〜${hi}円`;
+    if (lo) return `${lo}円〜`;
+    return `〜${hi}円`;
+  }, [budgetMin, budgetMax]);
+
+  // URL 用クエリ文字列（既定値は省略して URL を短く保つ）。
+  const urlQs = React.useMemo(() => buildQueryString(filters), [filters]);
+
+  // API 用クエリ文字列（page/limit は常に明示）。
+  const apiQs = React.useMemo(() => {
+    const u = new URLSearchParams(urlQs);
+    u.set("page", String(page));
+    u.set("limit", String(pageSize));
+    return u.toString();
+  }, [urlQs, page, pageSize]);
+
+  // 状態 → URL 同期。現在の URL と異なるときだけ replace（履歴を汚さない・ループ防止）。
+  React.useEffect(() => {
+    const current = searchParams?.toString() ?? "";
+    if (current === urlQs) return;
+    const href = urlQs ? `${pathname}?${urlQs}` : pathname;
+    router.replace(href, { scroll: false });
+  }, [urlQs, pathname, router, searchParams]);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["jobs", apiQs],
+    queryFn: async () => {
+      const res = await fetch(`/api/detected-jobs?${apiQs}`, { cache: "no-store" });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error.message);
+      return json.data as JobsListPayload;
+    },
+    placeholderData: (prev) => prev,
+  });
+
+  React.useEffect(() => {
+    if (data && data.totalPages > 0 && page > data.totalPages) {
+      setPage(data.totalPages);
+    }
+  }, [data, page]);
+
+  const listJobs = data?.jobs ?? [];
+  const total = data?.total ?? 0;
+  const freshN = data?.freshInWindow ?? 0;
+  const totalPages = data?.totalPages ?? 1;
+  const limit = data?.limit ?? pageSize;
+  const currentPage = data?.page ?? page;
+
+  const rangeStart = total === 0 ? 0 : (currentPage - 1) * limit + 1;
+  const rangeEnd = Math.min(currentPage * limit, total);
+
+  const bulk = useMutation({
+    mutationFn: async (payload: { ids: string[]; notificationSent: boolean }) => {
+      const res = await fetch("/api/detected-jobs/bulk", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error.message);
+      return json.data as { updated: number };
+    },
+    onSuccess: (r) => {
+      toast.success(`Updated ${r.updated} rows`);
+      setSelected({});
+      void qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  // ジョブ単体のステータス更新（楽観的更新）
+  const statusMut = useMutation({
+    mutationFn: async (payload: { id: string; status: JobStatusValue }) => {
+      const res = await fetch(`/api/detected-jobs/${payload.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: payload.status }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error.message);
+      return payload;
+    },
+    onMutate: ({ id, status }) => {
+      setStatusOverrides((prev) => ({ ...prev, [id]: status }));
+    },
+    onError: (e: Error, { id }) => {
+      toast.error(e.message);
+      // 失敗時はオーバーレイを取り消してサーバ値に戻す
+      setStatusOverrides((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    },
+  });
+
+  const handleStatusChange = (id: string, status: JobStatusValue) => {
+    statusMut.mutate({ id, status });
+    setDetail((d) => (d && d.id === id ? { ...d, status } : d));
+  };
+
+  // 応募見積もり金額の更新（楽観的更新）
+  const amountMut = useMutation({
+    mutationFn: async (payload: { id: string; appliedAmount: number | null }) => {
+      const res = await fetch(`/api/detected-jobs/${payload.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appliedAmount: payload.appliedAmount }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error.message);
+      return payload;
+    },
+    onMutate: ({ id, appliedAmount }) => {
+      setAmountOverrides((prev) => ({ ...prev, [id]: appliedAmount }));
+    },
+    onError: (e: Error, { id }) => {
+      toast.error(e.message);
+      setAmountOverrides((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    },
+  });
+
+  const handleAmountChange = (id: string, appliedAmount: number | null) => {
+    amountMut.mutate({ id, appliedAmount });
+    setDetail((d) => (d && d.id === id ? { ...d, appliedAmount } : d));
+  };
+
+  const idsSelected = React.useMemo(() => Object.entries(selected).filter(([, v]) => v).map(([k]) => k), [selected]);
+
+  const toggleAll = (checked: boolean) => {
+    if (!listJobs.length) return;
+    const next: Record<string, boolean> = { ...selected };
+    if (checked) for (const j of listJobs) next[j.id] = true;
+    else for (const j of listJobs) delete next[j.id];
+    setSelected(next);
+  };
+
+  return (
+    <div className="space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Detected jobs</h1>
+            {!isLoading && data ? (
+              <>
+                <Badge variant="secondary" className="tabular-nums">
+                  {total} matching
+                </Badge>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge
+                      variant="outline"
+                      className="cursor-help gap-1 border-emerald-500/40 bg-emerald-500/10 tabular-nums text-emerald-900 dark:text-emerald-200"
+                    >
+                      <SparklesIcon className="size-3.5 shrink-0" aria-hidden />
+                      {freshN} new (2h)
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-[260px] text-xs">
+                    Jobs first detected in the last two hours, with current filters applied. Same window as the “Fresh” row highlight.
+                  </TooltipContent>
+                </Tooltip>
+              </>
+            ) : null}
+          </div>
+          <p className="text-sm text-zinc-500">Search, prioritize, and paginate detected postings.</p>
+          {selectedKeywords.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
+                <TagsIcon className="size-3.5 shrink-0" aria-hidden />
+                キーワード一致のみ (OR):
+              </span>
+              {selectedKeywords.map((kw) => (
+                <Badge
+                  key={kw}
+                  variant="outline"
+                  className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-900 dark:text-emerald-200"
+                >
+                  {kw}
+                </Badge>
+              ))}
+            </div>
+          ) : null}
+          {budgetMin || budgetMax ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                <JapaneseYenIcon className="size-3.5 shrink-0" aria-hidden />
+                見積:
+              </span>
+              <Badge
+                variant="outline"
+                className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-900 dark:text-amber-200"
+              >
+                {budgetLabel}
+              </Badge>
+              {!budgetIncludeUnknown ? (
+                <Badge
+                  variant="outline"
+                  className="border-zinc-300 text-[10px] text-zinc-500 dark:border-zinc-600 dark:text-zinc-400"
+                >
+                  金額不明を除外
+                </Badge>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={bulkFetching || listJobs.length === 0}
+            onClick={() => void handleBulkLiveStats()}
+            className="gap-1.5"
+          >
+            {bulkFetching ? (
+              <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
+            ) : (
+              <UsersIcon className="size-3.5" aria-hidden />
+            )}
+            応募データ取得
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={idsSelected.length === 0 || bulk.isPending}
+            onClick={() => bulk.mutate({ ids: idsSelected, notificationSent: true })}
+          >
+            Bulk mark notified
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={idsSelected.length === 0 || bulk.isPending}
+            onClick={() => bulk.mutate({ ids: idsSelected, notificationSent: false })}
+          >
+            Bulk reset flag
+          </Button>
+        </div>
+      </header>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FilterIcon className="size-4 text-zinc-500" /> Filters
+            </CardTitle>
+            <CardDescription>サーバー側でキーワード、プラットフォーム（LW／CW）、カテゴリ（システム／Web／AI）、並び順を適用します。</CardDescription>
+          </div>
+          <div className="flex flex-1 flex-col gap-3 sm:flex-row sm:flex-wrap xl:justify-end">
+            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="キーワード…" className="sm:max-w-xs" />
+            <Select
+              value={boardPf === "" ? "__pf_all__" : boardPf}
+              onValueChange={(v) => setBoardPf(v === "__pf_all__" ? "" : (v as "lw" | "cw"))}
+            >
+              <SelectTrigger
+                className="h-9 w-auto min-w-[5.75rem] max-w-none shrink-0 gap-2 overflow-hidden"
+                aria-label="プラットフォーム: すべて／LW／CW"
+              >
+                <SelectValue placeholder="すべて" className="min-w-0 flex-1 truncate text-left" />
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={4}>
+                <SelectItem value="__pf_all__">すべて</SelectItem>
+                <SelectItem value="lw">LW</SelectItem>
+                <SelectItem value="cw">CW</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={boardCat === "" ? "__cat_all__" : boardCat}
+              onValueChange={(v) =>
+                setBoardCat(v === "__cat_all__" ? "" : (v as "system" | "web" | "ai"))
+              }
+            >
+              <SelectTrigger
+                className="h-9 w-auto min-w-[6.75rem] max-w-none shrink-0 gap-2 overflow-hidden sm:min-w-[7rem]"
+                aria-label="求人カテゴリ: すべて／システム／Web／AI（掲載元URLに基づく）"
+              >
+                <SelectValue placeholder="すべて" className="min-w-0 flex-1 truncate text-left" />
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={4}>
+                <SelectItem value="__cat_all__">すべて</SelectItem>
+                <SelectItem value="system">システム</SelectItem>
+                <SelectItem value="web">Web</SelectItem>
+                <SelectItem value="ai">AI</SelectItem>
+              </SelectContent>
+            </Select>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-9 w-auto min-w-[8rem] shrink-0 justify-start gap-2 font-normal"
+                  aria-label="ステータスで絞り込み"
+                >
+                  <ListFilterIcon className="size-4 shrink-0 opacity-70" aria-hidden />
+                  <span className="truncate">
+                    {statusFilter.length === 0
+                      ? "ステータス"
+                      : `ステータス (${statusFilter.length})`}
+                  </span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-52 p-2">
+                <div className="flex items-center justify-between px-1 pb-1.5">
+                  <span className="text-xs font-medium text-zinc-500">ステータス</span>
+                  {statusFilter.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setStatusFilter([])}
+                      className="text-xs text-violet-600 hover:underline dark:text-violet-400"
+                    >
+                      クリア
+                    </button>
+                  ) : null}
+                </div>
+                <Separator className="mb-1" />
+                <div className="space-y-0.5">
+                  {JOB_STATUS_LIST.map((s) => {
+                    const checked = statusFilter.includes(s.value);
+                    return (
+                      <label
+                        key={s.value}
+                        className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1.5 text-sm hover:bg-muted"
+                      >
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(v) =>
+                            setStatusFilter((prev) =>
+                              v ? [...prev, s.value] : prev.filter((x) => x !== s.value),
+                            )
+                          }
+                          aria-label={s.label}
+                        />
+                        <span
+                          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs ${s.badgeClass}`}
+                        >
+                          {s.label}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </PopoverContent>
+            </Popover>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-9 w-auto min-w-[8rem] shrink-0 justify-start gap-2 font-normal"
+                  aria-label="キーワードで絞り込み（個別 ON/OFF）"
+                >
+                  <TagsIcon className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                  <span className="truncate">
+                    {selectedKeywords.length === 0
+                      ? "キーワード"
+                      : `キーワード (${selectedKeywords.length})`}
+                  </span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-64 p-2">
+                <div className="flex items-center justify-between px-1 pb-1.5">
+                  <span className="text-xs font-medium text-zinc-500">
+                    キーワード（OR 一致）
+                  </span>
+                  {selectedKeywords.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setSelectedKeywords([])}
+                      className="text-xs text-violet-600 hover:underline dark:text-violet-400"
+                    >
+                      クリア
+                    </button>
+                  ) : null}
+                </div>
+                <Separator className="mb-1" />
+                {savedKeywords.length === 0 ? (
+                  <p className="px-1.5 py-2 text-xs text-zinc-500">
+                    キーワードが未設定です。Settings で登録すると、ここで個別に ON/OFF できます。
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between px-1.5 pb-1">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedKeywords(savedKeywords)}
+                        className="text-xs text-zinc-600 hover:underline dark:text-zinc-300"
+                        disabled={selectedKeywords.length === savedKeywords.length}
+                      >
+                        すべて ON
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedKeywords([])}
+                        className="text-xs text-zinc-600 hover:underline dark:text-zinc-300"
+                        disabled={selectedKeywords.length === 0}
+                      >
+                        すべて OFF
+                      </button>
+                    </div>
+                    <div className="max-h-64 space-y-0.5 overflow-y-auto">
+                      {savedKeywords.map((kw) => {
+                        const on = selectedKeywords.some(
+                          (k) => k.toLowerCase() === kw.toLowerCase(),
+                        );
+                        return (
+                          <label
+                            key={kw}
+                            className="flex cursor-pointer items-center justify-between gap-2 rounded-md px-1.5 py-1.5 text-sm hover:bg-muted"
+                          >
+                            <span className="min-w-0 flex-1 truncate" title={kw}>
+                              {kw}
+                            </span>
+                            <Switch
+                              checked={on}
+                              onCheckedChange={(v) => toggleKeyword(kw, !!v)}
+                              aria-label={`キーワード「${kw}」で絞り込む`}
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </PopoverContent>
+            </Popover>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="h-9 w-auto min-w-[8rem] shrink-0 justify-start gap-2 font-normal"
+                  aria-label="見積（予算）レンジで絞り込み"
+                >
+                  <JapaneseYenIcon className="size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+                  <span className="truncate">{budgetLabel}</span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-72 p-3">
+                <div className="flex items-center justify-between pb-2">
+                  <span className="text-xs font-medium text-zinc-500">見積（予算）レンジ（円）</span>
+                  {budgetMin || budgetMax ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setBudgetMin("");
+                        setBudgetMax("");
+                      }}
+                      className="text-xs text-violet-600 hover:underline dark:text-violet-400"
+                    >
+                      クリア
+                    </button>
+                  ) : null}
+                </div>
+                <Separator className="mb-3" />
+                <div className="flex items-end gap-2">
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="budget-min" className="text-[11px] text-zinc-500">
+                      最小
+                    </Label>
+                    <Input
+                      id="budget-min"
+                      inputMode="numeric"
+                      value={budgetMin}
+                      onChange={(e) => setBudgetMin(e.target.value.replace(/[^\d]/g, ""))}
+                      placeholder="例: 100000"
+                      className="h-9 tabular-nums"
+                    />
+                  </div>
+                  <span className="pb-2 text-zinc-400">〜</span>
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="budget-max" className="text-[11px] text-zinc-500">
+                      最大
+                    </Label>
+                    <Input
+                      id="budget-max"
+                      inputMode="numeric"
+                      value={budgetMax}
+                      onChange={(e) => setBudgetMax(e.target.value.replace(/[^\d]/g, ""))}
+                      placeholder="例: 300000"
+                      className="h-9 tabular-nums"
+                    />
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {[
+                    { label: "〜5万", min: "", max: "50000" },
+                    { label: "5〜10万", min: "50000", max: "100000" },
+                    { label: "10〜30万", min: "100000", max: "300000" },
+                    { label: "30万〜", min: "300000", max: "" },
+                  ].map((p) => (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => {
+                        setBudgetMin(p.min);
+                        setBudgetMax(p.max);
+                      }}
+                      className="rounded-full border border-zinc-200 px-2.5 py-1 text-[11px] text-zinc-600 transition-colors hover:bg-muted dark:border-zinc-700 dark:text-zinc-300"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+                <Separator className="my-3" />
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-700 dark:text-zinc-300">
+                  <Checkbox
+                    checked={budgetIncludeUnknown}
+                    onCheckedChange={(v) => setBudgetIncludeUnknown(v !== false)}
+                    aria-label="金額不明（応相談・要確認）の案件を含める"
+                    className="mt-0.5"
+                  />
+                  <span>
+                    金額不明（応相談・要確認）の案件を含める
+                    <span className="mt-0.5 block text-[10px] leading-snug text-zinc-400">
+                      オフにすると、見積レンジ指定中は金額が読み取れない案件を除外します。
+                    </span>
+                  </span>
+                </label>
+              </PopoverContent>
+            </Popover>
+            <Select value={sort || "__default"} onValueChange={(v) => setSort(v === "__default" ? "" : (v as typeof sort))}>
+              <SelectTrigger className="flex h-9 w-auto min-w-[10.5rem] max-w-none shrink-0 gap-2 overflow-hidden sm:min-w-[11.5rem]">
+                <ArrowUpDownIcon className="size-4 shrink-0 opacity-70" aria-hidden />
+                <SelectValue placeholder="Sort" className="min-w-0 flex-1 truncate text-left" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__default">Newest detected</SelectItem>
+                <SelectItem value="posted">Posted time ↓</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardContent className="p-0">
+          {isLoading && !data ? (
+            <Skeleton className="h-96 w-full rounded-none rounded-b-xl" />
+          ) : (
+            <>
+              <DetectedJobsPaginationBar
+                rangeStart={rangeStart}
+                rangeEnd={rangeEnd}
+                total={total}
+                currentPage={currentPage}
+                totalPages={totalPages}
+                pageSize={pageSize}
+                setPage={setPage}
+                setPageSize={setPageSize}
+              />
+              <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-[40px]">
+                      <Checkbox
+                        checked={Boolean(listJobs.length && listJobs.every((j) => selected[j.id]))}
+                        onCheckedChange={(v) => toggleAll(!!v)}
+                        aria-label="Select all rows on this page"
+                      />
+                    </TableHead>
+                    <TableHead>Job</TableHead>
+                    <TableHead className="min-w-[6rem]">
+                      <span className="block">Board</span>
+                      <span className="block text-[10px] font-normal normal-case text-zinc-500 dark:text-zinc-400">
+                        LW/CW · job category
+                      </span>
+                    </TableHead>
+                    <TableHead className="min-w-[9rem]">Client</TableHead>
+                    <TableHead>Budget</TableHead>
+                    <TableHead className="hidden min-w-[7rem] sm:table-cell">
+                      <span className="flex items-center gap-1">
+                        <ClockIcon className="size-3 shrink-0 text-zinc-400" aria-hidden />
+                        投稿時間
+                      </span>
+                    </TableHead>
+                    <TableHead className="min-w-[5rem]">
+                      <span className="flex items-center gap-1">
+                        <UsersIcon className="size-3 shrink-0 text-zinc-400" aria-hidden />
+                        応募数
+                      </span>
+                    </TableHead>
+                    <TableHead className="min-w-[6rem]">残り日数</TableHead>
+                    <TableHead className="min-w-[7.5rem]">ステータス</TableHead>
+                    <TableHead className="min-w-[6.5rem]">応募見積もり</TableHead>
+                    <TableHead className="w-[80px] text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {listJobs.map((job) => {
+                    const detected = new Date(job.detectedAt).getTime();
+                    const fresh = Date.now() - detected < NEW_MS;
+                    return (
+                      <motion.tr
+                        layout
+                        key={job.id}
+                        className={fresh ? "bg-emerald-500/5 hover:bg-muted/70" : "hover:bg-muted/50"}
+                      >
+                        <TableCell>
+                          <Checkbox
+                            checked={!!selected[job.id]}
+                            onCheckedChange={(v) => setSelected((s) => ({ ...s, [job.id]: !!v }))}
+                            aria-label={`Select ${job.title}`}
+                          />
+                        </TableCell>
+                        <TableCell className="max-w-[320px]">
+                          <button
+                            type="button"
+                            className="text-left"
+                            onClick={() => setDetail(job)}
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className={`line-clamp-2 font-medium ${fresh ? "text-emerald-800 dark:text-emerald-300" : "text-zinc-900 dark:text-zinc-100"}`}>
+                                {job.title}
+                              </p>
+                              {fresh ? (
+                                <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] uppercase">
+                                  Fresh
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <p className="truncate text-[11px] text-zinc-500">
+                              Detected {formatDistanceToNow(new Date(job.detectedAt), { addSuffix: true, locale: ja })}
+                            </p>
+                          </button>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            {job.tags.slice(0, 4).map((t) => (
+                              <Badge key={t} variant="secondary" className="text-[10px]">
+                                #{t}
+                              </Badge>
+                            ))}
+                          </div>
+                        </TableCell>
+                        <TableCell className="max-w-[7.25rem] align-top">
+                          <PostingSourceBadges dense platform={job.platform} listingUrl={job.sourceUrl} />
+                        </TableCell>
+                        <ClientCell job={job} />
+                        <TableCell className="max-w-[160px] align-middle">
+                          <BudgetCell budget={job.budget} />
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell">
+                          <LiveStatsCell
+                            stats={liveStatsMap[job.id]}
+                            field="posted"
+                            fallbackPostedAt={job.detectedAt}
+                          />
+                        </TableCell>
+                        <TableCell className="align-middle">
+                          <LiveStatsCell stats={liveStatsMap[job.id]} field="applicants" />
+                        </TableCell>
+                        <TableCell className="align-middle">
+                          <LiveStatsCell stats={liveStatsMap[job.id]} field="deadline" />
+                        </TableCell>
+                        <TableCell className="align-middle">
+                          <StatusCell
+                            value={statusOverrides[job.id] ?? job.status}
+                            onChange={(s) => handleStatusChange(job.id, s)}
+                          />
+                        </TableCell>
+                        <TableCell className="align-middle">
+                          <AppliedAmountCell
+                            status={statusOverrides[job.id] ?? job.status}
+                            amount={
+                              job.id in amountOverrides
+                                ? amountOverrides[job.id]!
+                                : job.appliedAmount
+                            }
+                            onChange={(v) => handleAmountChange(job.id, v)}
+                          />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-0.5">
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" asChild>
+                                  <a
+                                    href={job.projectUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    aria-label={`Open job posting: ${job.title.slice(0, 80)}`}
+                                  >
+                                    <ExternalLinkIcon className="size-4" />
+                                  </a>
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>Open posting in new tab</TooltipContent>
+                            </Tooltip>
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button size="icon" variant="ghost" className="size-8 shrink-0" aria-label={`More actions: ${job.title.slice(0, 60)}`}>
+                                  <MoreHorizontalIcon className="size-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="min-w-[200px]">
+                                <DropdownMenuItem asChild>
+                                  <a href={job.projectUrl} target="_blank" rel="noopener noreferrer">
+                                    <ExternalLinkIcon />
+                                    Open posting in new tab
+                                  </a>
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  onClick={async () => {
+                                    await navigator.clipboard.writeText(job.projectUrl);
+                                    toast.success("Job URL copied");
+                                  }}
+                                >
+                                  <CopyIcon />
+                                  Copy job URL
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={() => setDetail(job)}>
+                                  <InfoIcon />
+                                  View details…
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        </TableCell>
+                      </motion.tr>
+                    );
+                  })}
+                  {total === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={11}>
+                        <div className="flex flex-col items-center gap-2 py-14 text-center">
+                          <p className="font-medium text-zinc-900 dark:text-zinc-100">No jobs in this view</p>
+                          <p className="max-w-md text-sm text-zinc-500">
+                            Adjust filters or wait for{" "}
+                            <code className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-xs dark:bg-zinc-800">monitor.py</code>{" "}
+                            to ingest new postings. Rows only appear once a job has been detected at least once.
+                          </p>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ) : null}
+                </TableBody>
+              </Table>
+            </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
+        <DialogContent className="flex max-h-[90vh] w-[calc(100%-2rem)] max-w-xl flex-col gap-0 overflow-hidden p-0 sm:rounded-2xl">
+          <DialogHeader className="shrink-0 border-b border-zinc-200 px-6 py-5 dark:border-zinc-800">
+            <DialogTitle className="pr-10 leading-tight">{detail?.title}</DialogTitle>
+            {detail ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">LW/CW · board</span>
+                <PostingSourceBadges orientation="row" platform={detail.platform} listingUrl={detail.sourceUrl} />
+              </div>
+            ) : null}
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-6 py-5 [scrollbar-gutter:stable]">
+            {detail ? (
+              <div className="space-y-4 pb-2 text-sm text-zinc-600 dark:text-zinc-400">
+                <DetailRow
+                  label="投稿のリンク"
+                  value={
+                    detail.projectUrl ? (
+                      <a
+                        href={detail.projectUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-mono text-xs font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {detail.projectUrl}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+                <DetailRow
+                  label="Listing feed"
+                  value={
+                    detail.sourceUrl ? (
+                      <a
+                        href={detail.sourceUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-mono text-xs font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {detail.sourceUrl}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+                <DetailRow label="Budget" value={detail.budget} />
+                <DetailRow label="Client" value={detail.clientName?.trim() || clientNameFromRaw(detail.rawData) || "—"} />
+                <DetailRow
+                  label="Client profile"
+                  value={
+                    detail && resolveClientProfileUrl(detail) ? (
+                      <a
+                        href={resolveClientProfileUrl(detail)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="break-all font-normal text-sky-700 underline decoration-sky-700/35 underline-offset-2 hover:text-sky-600 dark:text-sky-400"
+                      >
+                        {resolveClientProfileUrl(detail)}
+                      </a>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+                <DetailRow
+                  label={isCrowdWorksJob(detail) ? "Contracts (client)" : "Orders (client)"}
+                  value={detail.clientOrders?.trim() || "—"}
+                />
+                {isCrowdWorksJob(detail) ? (
+                  <DetailRow
+                    label="完了率（補足）"
+                    value={crowdworksCompletionRateChipFromHaystack(clientExtrasHaystack(detail))}
+                  />
+                ) : (
+                  <DetailRow label="発注率（補足）" value={lancersOrderRateChipFromHaystack(clientExtrasHaystack(detail))} />
+                )}
+                {isLancersPlatformJob(detail) ? (
+                  <DetailRow
+                    label="フィードバック"
+                    value={<LancersClientFeedbackStrip haystack={clientExtrasHaystack(detail)} compact={false} />}
+                  />
+                ) : null}
+                <DetailRow
+                  label={isCrowdWorksJob(detail) ? "Rating (overall)" : "Rating (listing)"}
+                  value={
+                    typeof detail.clientRating === "number" && Number.isFinite(detail.clientRating)
+                      ? `${detail.clientRating.toFixed(1)} / 5`
+                      : "—"
+                  }
+                />
+                <DetailRow
+                  label="Client details"
+                  value={(() => {
+                    const raw = detail.clientExtrasSummary?.trim();
+                    if (!raw) return "—";
+                    const forInline = isLancersPlatformJob(detail) ? stripLancersFeedbackPhrases(raw) : raw;
+                    if (!forInline.trim()) return "—";
+                    return (
+                      <span className="block whitespace-pre-wrap font-normal">
+                        <ClientExtrasInline
+                          text={forInline}
+                          className="text-sm text-zinc-800 dark:text-zinc-100"
+                        />
+                      </span>
+                    );
+                  })()}
+                />
+                <DetailRow
+                  label="Posted"
+                  value={detail.postedAt ? new Date(detail.postedAt).toLocaleString() : "—"}
+                />
+                <DetailRow label="Detected" value={new Date(detail.detectedAt).toLocaleString()} />
+                <DetailRow
+                  label="ステータス"
+                  value={
+                    <Badge
+                      variant="outline"
+                      className={`text-xs font-normal ${jobStatusMeta(detail.status).badgeClass}`}
+                    >
+                      {jobStatusMeta(detail.status).label}
+                    </Badge>
+                  }
+                />
+                {statusAllowsAmount(detail.status) ? (
+                  <DetailRow
+                    label="応募見積もり"
+                    value={formatYen(detail.appliedAmount) ?? "未入力"}
+                  />
+                ) : null}
+                <div>
+                  <Label className="text-xs uppercase text-zinc-500">Description</Label>
+                  <p className="mt-2 whitespace-pre-wrap">{detail.description || "(empty)"}</p>
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter className="shrink-0 gap-3 border-t border-zinc-200 px-6 py-4 dark:border-zinc-800 sm:justify-between">
+            <Button variant="outline" asChild>
+              <a href={detail?.projectUrl ?? "#"} target="_blank" rel="noopener noreferrer">
+                Open posting
+              </a>
+            </Button>
+            <Button
+              onClick={() => detail && navigator.clipboard.writeText(detail.projectUrl).then(() => toast.success("Copied"))}
+            >
+              Copy link
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/**
+ * `useSearchParams` を使うため Suspense 境界でラップする（Next.js App Router の要件）。
+ */
+export default function JobsPage() {
+  return (
+    <React.Suspense fallback={<Skeleton className="h-96 w-full rounded-xl" />}>
+      <JobsPageInner />
+    </React.Suspense>
+  );
+}
+
+function DetailRow(props: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex gap-6">
+      <p className="w-36 shrink-0 text-xs uppercase tracking-wide text-zinc-400">{props.label}</p>
+      <div className="min-w-0 flex-1 text-sm font-medium text-zinc-900 dark:text-zinc-100">{props.value}</div>
+    </div>
+  );
+}
+
+/**
+ * 応募見積もり金額のインライン編集セル。
+ * 応募済以降のステータスのときのみ編集可能。クリックで入力欄に切り替わり、
+ * Enter / blur で保存、Escape で取り消し。空保存で金額をクリア。
+ */
+function AppliedAmountCell({
+  status,
+  amount,
+  onChange,
+}: {
+  status: JobStatusValue;
+  amount: number | null;
+  onChange: (next: number | null) => void;
+}) {
+  const editable = statusAllowsAmount(status);
+  const [editing, setEditing] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+
+  if (!editable) {
+    return <span className="text-zinc-400" title="応募済以降で入力できます">—</span>;
+  }
+
+  const commit = () => {
+    const digits = draft.replace(/[^\d]/g, "");
+    const next = digits === "" ? null : parseInt(digits, 10);
+    setEditing(false);
+    // 値が変わったときだけ保存
+    if (next !== amount) onChange(Number.isNaN(next as number) ? null : next);
+  };
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        inputMode="numeric"
+        defaultValue={amount != null ? String(amount) : ""}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") {
+            setDraft(amount != null ? String(amount) : "");
+            setEditing(false);
+          }
+        }}
+        placeholder="円"
+        className="h-7 w-[6rem] rounded-md border border-zinc-300 bg-transparent px-2 text-sm tabular-nums outline-none focus:border-violet-500 dark:border-zinc-700"
+      />
+    );
+  }
+
+  const label = formatYen(amount);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        setDraft(amount != null ? String(amount) : "");
+        setEditing(true);
+      }}
+      className={`rounded-md px-1.5 py-0.5 text-sm tabular-nums transition-colors hover:bg-muted ${
+        label ? "text-zinc-900 dark:text-zinc-100" : "text-zinc-400"
+      }`}
+      title="クリックして編集"
+    >
+      {label ?? "未入力"}
+    </button>
+  );
+}
+
+/** 行ごとの応募管理ステータス。色付きバッジ風トリガーのドロップダウンで編集する。 */
+function StatusCell({
+  value,
+  onChange,
+}: {
+  value: JobStatusValue;
+  onChange: (next: JobStatusValue) => void;
+}) {
+  const meta = jobStatusMeta(value);
+  return (
+    <Select value={value} onValueChange={(v) => onChange(v as JobStatusValue)}>
+      <SelectTrigger
+        className={`h-7 w-auto min-w-[6.5rem] gap-1.5 rounded-full border px-2.5 text-xs font-medium ${meta.badgeClass}`}
+        aria-label="ステータスを変更"
+      >
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {JOB_STATUS_LIST.map((s) => (
+          <SelectItem key={s.value} value={s.value}>
+            <span className="flex items-center gap-2">
+              <span className={`size-2 rounded-full ${s.badgeClass}`} aria-hidden />
+              {s.label}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/**
+ * 投稿時間を相対表記で表示。ホバーで正確な日時（ja-JP）。値が無ければダッシュ。
+ * `approximate` の場合は検出日時を代用した概算値であることを示す（末尾に ~ ・注記）。
+ */
+function PostedTime({ iso, approximate }: { iso: string | null; approximate?: boolean }) {
+  if (!iso) return <span className="text-zinc-400">—</span>;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return <span className="text-zinc-400">—</span>;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="cursor-help text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+          {formatDistanceToNow(d, { addSuffix: true, locale: ja })}
+          {approximate ? <span className="text-zinc-400"> ~</span> : null}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="left">
+        {d.toLocaleString("ja-JP")}
+        {approximate ? "（検出時刻・概算）" : ""}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+function BudgetCell({ budget }: { budget: string }) {
+  const parsed = parseBudget(budget);
+
+  if (!parsed.isRange || parsed.upper == null) {
+    if (parsed.lower === "—") return <span className="text-zinc-400">—</span>;
+    return (
+      <span className="text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+        {parsed.lower}
+      </span>
+    );
+  }
+
+  return (
+    <div className="flex flex-col leading-tight">
+      {parsed.kind ? (
+        <span className="text-[11px] text-zinc-400">{parsed.kind}</span>
+      ) : null}
+      <span className="text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+        {parsed.lower}
+      </span>
+      <span className="text-sm tabular-nums text-zinc-700 dark:text-zinc-300">
+        {parsed.upper}
+      </span>
+    </div>
+  );
+}
+
+function LiveStatsCell({
+  stats,
+  field,
+  fallbackPostedAt,
+}: {
+  stats: RowStats | undefined;
+  field: "applicants" | "deadline" | "posted";
+  /** 検出日時（≒投稿直後）。live-stats から正確な投稿日時が取れない場合に概算として代用。 */
+  fallbackPostedAt?: string | null;
+}) {
+  if (!stats) {
+    // 未取得（ボタン押下前）: 投稿時間列は検出日時（概算）を表示しておく。
+    // 応募数・残り日数はボタンを押すまで取得できないためダッシュ。
+    if (field === "posted")
+      return <PostedTime iso={fallbackPostedAt ?? null} approximate />;
+    return <span className="text-zinc-400">—</span>;
+  }
+  if ("loading" in stats)
+    return <LoaderCircleIcon className="size-3.5 animate-spin text-zinc-400" aria-hidden />;
+  if ("error" in stats)
+    return (
+      <span className="text-[11px] text-red-500 dark:text-red-400" title={stats.error}>
+        エラー
+      </span>
+    );
+
+  if (field === "applicants") {
+    return (
+      <span className="tabular-nums text-sm">
+        {stats.applicants != null ? `${stats.applicants}件` : "—"}
+      </span>
+    );
+  }
+
+  if (field === "posted") {
+    // 投稿日時を取得できた場合（CrowdWorks）はそれを、取れない場合（Lancers）は
+    // 検出日時（≒投稿直後）を代用して、相対時間で表示する。
+    if (stats.postedAt) return <PostedTime iso={stats.postedAt} />;
+    if (fallbackPostedAt) return <PostedTime iso={fallbackPostedAt} approximate />;
+    return <span className="text-zinc-400">—</span>;
+  }
+
+  if (field === "deadline") {
+    // 締切が取れない場合（Lancers）は募集期間を残り日数列に表示する。
+    if (!stats.deadline && stats.recruitmentPeriod) {
+      return (
+        <span className="text-sm text-zinc-700 dark:text-zinc-300">
+          {stats.recruitmentPeriod}
+        </span>
+      );
+    }
+  }
+
+  if (!stats.deadline) return <span className="text-zinc-400">—</span>;
+  const { deadlineDays, deadline } = stats;
+  const label =
+    deadlineDays == null
+      ? deadline
+      : deadlineDays < 0
+        ? "期限超過"
+        : deadlineDays === 0
+          ? "本日"
+          : `残り${deadlineDays}日`;
+  const cls =
+    deadlineDays != null && deadlineDays < 0
+      ? "text-sm font-medium text-red-600 dark:text-red-400"
+      : deadlineDays != null && deadlineDays <= 3
+        ? "text-sm font-medium text-amber-600 dark:text-amber-400"
+        : "text-sm text-zinc-900 dark:text-zinc-100";
+
+  return (
+    <span className={cls} title={deadline}>
+      {label}
+    </span>
+  );
+}

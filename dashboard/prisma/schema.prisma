@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ScrapingType {
+  HTML_PARSE
+  API
+  HYBRID
+}
+
+enum DiscordDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// 応募管理用のステータス（ユーザーが手動で設定・編集）。
+enum JobStatus {
+  NONE       // 未対応
+  CONSIDERING // 検討中
+  APPLIED    // 応募済
+  INTERVIEW  // 面談
+  WON        // 受注
+  REJECTED   // 見送り
+}
+
+/// クライアントの事業主体（個人／法人）。提案トーン・成約率の判断材料。
+enum ClientEntityType {
+  UNKNOWN     // 不明（推定不可）
+  INDIVIDUAL  // 個人・個人事業主
+  CORPORATE   // 法人
+}
+
+model MonitoringSource {
+  id               String       @id @default(cuid())
+  platform         String
+  url              String       @unique
+  scrapingType     ScrapingType @default(HTML_PARSE) @map("scraping_type")
+  pollingInterval  Int          @default(180) @map("polling_interval")
+  active           Boolean      @default(true)
+  parserVersion    String       @default("1.0.0") @map("parser_version")
+  lastCheckedAt    DateTime?    @map("last_checked_at")
+  status           String       @default("idle")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  scrapeHistories ScrapeHistory[]
+  detectedJobs    DetectedJob[]
+
+  @@index([platform, active])
+  @@map("monitoring_sources")
+}
+
+model DetectedJob {
+  id                 String           @id @default(cuid())
+  sourceId           String           @map("source_id")
+  title              String
+  description        String           @default("")
+  budget             String           @default("")
+  clientName         String           @default("") @map("client_name")
+  /// Monitor ``client_profile_url`` (e.g. ``/client/slug`` or CrowdWorks employer path).
+  clientProfileUrl   String?          @map("client_profile_url")
+  clientOrders       String?          @map("client_orders")
+  clientRating       Float?           @map("client_rating")
+  /// Full ``client_extras`` line from listing/profile enrichment (発注率・フィードバック等).
+  clientExtrasSummary String?         @map("client_extras_summary") @db.Text
+  clientAvatarUrl    String?          @map("client_avatar_url")
+  projectUrl         String           @map("project_url")
+  postedAt           DateTime?        @map("posted_at")
+  detectedAt         DateTime         @default(now()) @map("detected_at")
+  aiScore            Float?           @map("ai_score")
+  tags               String[]
+  status             JobStatus        @default(NONE)
+  /// 応募時に提示した見積もり金額（円）。応募済以降のみ使用。
+  appliedAmount      Int?             @map("applied_amount")
+  notificationSent   Boolean          @default(false) @map("notification_sent")
+  rawData            Json?            @map("raw_data")
+
+  source MonitoringSource       @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  discordNotifications DiscordNotification[]
+  aiAnalysis           AiAnalysis?
+
+  @@unique([projectUrl])
+  @@index([sourceId, detectedAt(sort: Desc)])
+  @@index([aiScore(sort: Desc)])
+  @@map("detected_jobs")
+}
+
+model ScrapeHistory {
+  id          String    @id @default(cuid())
+  sourceId    String    @map("source_id")
+  startedAt   DateTime  @default(now()) @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  success     Boolean   @default(false)
+  jobsFound   Int       @default(0) @map("jobs_found")
+  errorMessage String?  @map("error_message")
+  logs        Json?
+  retryCount  Int       @default(0) @map("retry_count")
+  workerHost  String?   @map("worker_host")
+
+  source MonitoringSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([sourceId, startedAt(sort: Desc)])
+  @@map("scrape_histories")
+}
+
+model DiscordNotification {
+  id             String               @id @default(cuid())
+  detectedJobId  String               @map("detected_job_id")
+  webhookUrl     String               @map("webhook_url")
+  status         DiscordDeliveryStatus @default(PENDING)
+  sentAt         DateTime?            @map("sent_at")
+  responseLog    Json?                @map("response_log")
+
+  job DetectedJob @relation(fields: [detectedJobId], references: [id], onDelete: Cascade)
+
+  @@index([status, sentAt(sort: Desc)])
+  @@map("discord_notifications")
+}
+
+model AiAnalysis {
+  id                  String @id @default(cuid())
+  detectedJobId       String @unique @map("detected_job_id")
+  relevanceScore      Float  @default(0) @map("relevance_score")
+  profitabilityScore Float  @default(0) @map("profitability_score")
+  spamScore           Float  @default(0) @map("spam_score")
+  urgencyScore        Float  @default(0) @map("urgency_score")
+  analysisJson       Json    @default("{}") @map("analysis_json")
+
+  job DetectedJob @relation(fields: [detectedJobId], references: [id], onDelete: Cascade)
+
+  @@map("ai_analysis")
+}
+
+model AppSetting {
+  id        String @id @default(cuid())
+  key       String @unique
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("app_settings")
+}
+
+/// クライアント（発注者）単位の補助メタ。プロフィールキー（例: ``/client/foo`` や
+/// ``/public/employers/123``）で一意化し、同一クライアントの全求人に種別を一括反映する。
+model ClientProfile {
+  id            String           @id @default(cuid())
+  /// 集約キー。client-analysis の normalizeProfileKey と同じ正規化パス。
+  profileKey    String           @unique @map("profile_key")
+  platform      String           @default("")
+  displayName   String           @default("") @map("display_name")
+  /// 表示する事業主体。manualOverride=true のとき手動値が優先される。
+  entityType    ClientEntityType @default(UNKNOWN) @map("entity_type")
+  /// 名前・シグナルから自動推定した種別（参考値・上書きされない）。
+  autoEntityType ClientEntityType @default(UNKNOWN) @map("auto_entity_type")
+  /// 自動推定の確度（0–1）。名前ワード一致やプロフィールシグナルから算出。
+  autoConfidence Float           @default(0) @map("auto_confidence")
+  /// ユーザーが手動で確定したか（true なら ingest の自動推定で上書きしない）。
+  manualOverride Boolean         @default(false) @map("manual_override")
+  /// プロフィール由来の補助シグナル（is_official_account 等）。推定の根拠保存用。
+  signals        Json?
+  createdAt     DateTime         @default(now()) @map("created_at")
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  @@index([entityType])
+  @@map("client_profiles")
+}
