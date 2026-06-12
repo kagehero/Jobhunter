@@ -164,9 +164,12 @@ model ClientProfile {
   manualOverride Boolean         @default(false) @map("manual_override")
   /// プロフィール由来の補助シグナル（is_official_account 等）。推定の根拠保存用。
   signals        Json?
+  /// ブロック対象か。案件だけ出して採用しないクライアント等を、ジョブ一覧から除外する。
+  blocked        Boolean         @default(false)
   createdAt     DateTime         @default(now()) @map("created_at")
   updatedAt     DateTime         @updatedAt @map("updated_at")
 
   @@index([entityType])
+  @@index([blocked])
   @@map("client_profiles")
 }

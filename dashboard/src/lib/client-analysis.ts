@@ -51,6 +51,8 @@ export type ClientAnalysisRow = {
   entitySource: "manual" | "auto";
   /** 自動推定の確度（0–1）。 */
   entityConfidence: number;
+  /** ブロック済みか。true ならジョブ一覧で既定除外（ClientProfile から付与）。 */
+  blocked: boolean;
 };
 
 /** Canonical path for grouping (``/client/foo``, ``/public/employers/123``). */
@@ -279,6 +281,7 @@ export function aggregateClientAnalysis(rows: DetectedJobClientInput[]): {
       entityType: "UNKNOWN" as const,
       entitySource: "auto" as const,
       entityConfidence: 0,
+      blocked: false,
     };
   });
 
