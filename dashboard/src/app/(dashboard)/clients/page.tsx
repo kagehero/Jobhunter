@@ -28,6 +28,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ClientExtrasInline } from "@/components/client-extras-inline";
+import { EmptyState } from "@/components/ui/empty-state";
 import { sanitizeClientExtrasText } from "@/lib/client-extras-text";
 import { clientEntityLabel, type ClientEntityType } from "@/lib/client-entity";
 import {
@@ -371,15 +372,23 @@ export default function ClientsAnalysisPage() {
                 </TableHeader>
                 <TableBody>
                   {data.clients.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-zinc-500">
-                        クライアント情報がまだありません。モニターから ingest された求人が溜まると表示されます。
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell colSpan={7}>
+                        <EmptyState
+                          icon={UsersRoundIcon}
+                          title="クライアント情報がまだありません"
+                          description="モニターから ingest された求人が溜まると、発注者ごとに集約されて表示されます。"
+                        />
                       </TableCell>
                     </TableRow>
                   ) : filteredClients.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-zinc-500">
-                        検索に一致するクライアントがありません。キーワードを変えるか削除してください。
+                    <TableRow className="hover:bg-transparent">
+                      <TableCell colSpan={7}>
+                        <EmptyState
+                          icon={SearchIcon}
+                          title="一致するクライアントがありません"
+                          description="検索条件に合うクライアントが見つかりませんでした。キーワードを変えるか削除してください。"
+                        />
                       </TableCell>
                     </TableRow>
                   ) : (

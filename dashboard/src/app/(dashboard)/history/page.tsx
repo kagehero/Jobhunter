@@ -81,7 +81,9 @@ export default function HistoryPage() {
     <div className="space-y-6">
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Scrape history</h1>
-        <p className="text-sm text-zinc-500">Operational proof for every polled source.</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          各監視ソースのスクレイプ実行ログ（成否・件数・所要時間）。
+        </p>
       </header>
 
       {isLoading ? (
@@ -91,7 +93,7 @@ export default function HistoryPage() {
           <div className="absolute left-[11px] top-2 bottom-2 w-px bg-zinc-200 dark:bg-zinc-800" aria-hidden />
           {sorted.map((row) => (
             <article key={row.id} className="relative pb-10 pl-10">
-              <span className={`absolute left-3 top-2 mt-2 size-2 -translate-x-1/2 rounded-full ${row.success ? "bg-emerald-500" : "bg-red-600"}`} />
+              <span className={`absolute left-3 top-2 mt-2 size-2 -translate-x-1/2 rounded-full ${row.success ? "bg-emerald-500" : "bg-red-500"}`} aria-hidden />
               <Card className="border-zinc-200 bg-white/90 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/80">
                 <CardContent className="space-y-4 p-5">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -99,14 +101,14 @@ export default function HistoryPage() {
                       <PostingSourceBadges platform={row.platform} listingUrl={row.listingUrl} orientation="row" />
                       <p className="font-mono text-xs text-zinc-500">{row.listingUrlSlice}</p>
                     </div>
-                    <Badge variant={row.success ? "secondary" : "outline"}>
+                    <Badge variant={row.success ? "success" : "danger"}>
                       {row.success ? (
                         <>
-                          <CheckCircleIcon className="mr-1 size-3" /> Success
+                          <CheckCircleIcon /> Success
                         </>
                       ) : (
                         <>
-                          <AlertCircleIcon className="mr-1 size-3" /> Failed
+                          <AlertCircleIcon /> Failed
                         </>
                       )}
                     </Badge>

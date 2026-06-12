@@ -3,7 +3,7 @@
 import type { MonitoringSource, ScrapingType } from "@prisma/client";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
+import { LayersIcon, PencilIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,11 +16,21 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/utils";
 import { PostingSourceBadges } from "@/components/posting-source-badges";
 
 const MODES: ScrapingType[] = ["HTML_PARSE", "API", "HYBRID"];
 const PAGE_SIZE = 8;
+
+/** ソース稼働ステータスの文字列をセマンティックな Badge バリアントに対応づける。 */
+function statusBadgeVariant(status: string): "success" | "warning" | "danger" | "secondary" {
+  const s = status.toLowerCase();
+  if (s.includes("error") || s.includes("fail")) return "danger";
+  if (s.includes("run") || s.includes("ok") || s.includes("active")) return "success";
+  if (s.includes("pending") || s.includes("wait") || s.includes("retry")) return "warning";
+  return "secondary";
+}
 
 export default function SourcesPage() {
   const qc = useQueryClient();
@@ -99,7 +109,15 @@ export default function SourcesPage() {
           {isLoading ? (
             <Skeleton className="h-72 w-full" />
           ) : filtered.length === 0 ? (
-            <p className="py-12 text-center text-sm text-zinc-500">No sources match this filter.</p>
+            <EmptyState
+              icon={LayersIcon}
+              title={query.trim() ? "No matching sources" : "No sources yet"}
+              description={
+                query.trim()
+                  ? "検索条件に一致する監視ソースがありません。キーワードを変えるか削除してください。"
+                  : "監視ソースがまだ登録されていません。右上の「Add source」から追加してください。"
+              }
+            />
           ) : (
             <>
               <Table>
@@ -238,7 +256,7 @@ function Row({ source, onRequestDelete }: { source: MonitoringSource; onRequestD
         {source.lastCheckedAt ? new Date(source.lastCheckedAt).toLocaleString() : "—"}
       </TableCell>
       <TableCell>
-        <Badge variant="secondary" className="text-[10px] uppercase">
+        <Badge variant={statusBadgeVariant(source.status)} className="text-[10px] uppercase">
           {source.status}
         </Badge>
       </TableCell>
@@ -363,7 +381,7 @@ function AddDialog() {
       <DialogTrigger asChild>
         <Button size="sm">
           <PlusIcon className="size-4" />
-          Add
+          Add source
         </Button>
       </DialogTrigger>
       <DialogContent>
