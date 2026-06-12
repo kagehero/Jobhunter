@@ -60,6 +60,7 @@ export async function GET(req: Request) {
       autoEntityType: true,
       autoConfidence: true,
       manualOverride: true,
+      blocked: true,
     },
   });
   const profileByKey = new Map(profiles.map((p) => [p.profileKey, p]));
@@ -74,6 +75,7 @@ export async function GET(req: Request) {
       entityType: p.entityType,
       entitySource: (p.manualOverride ? "manual" : "auto") as "manual" | "auto",
       entityConfidence: p.manualOverride ? 1 : p.autoConfidence,
+      blocked: p.blocked,
     };
   });
 

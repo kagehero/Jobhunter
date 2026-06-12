@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpDownIcon,
+  BanIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   ChevronsLeftIcon,
@@ -91,6 +92,8 @@ type JobsFilters = {
   budgetMax: string;
   /** 金額不明（応相談・要確認）案件を含めるか。既定 true。 */
   budgetIncludeUnknown: boolean;
+  /** ブロック済みクライアントの案件も表示するか。既定 false（除外）。 */
+  includeBlocked: boolean;
   sort: "" | "posted";
   page: number;
   pageSize: number;
@@ -135,6 +138,11 @@ function parseFiltersFromParams(sp: URLSearchParams): JobsFilters {
     (sp.get("budgetIncludeUnknown") ?? "").trim().toLowerCase(),
   );
 
+  // 既定は除外（false）。URL に includeBlocked=1/true/on のときだけブロック済みも表示。
+  const includeBlocked = ["1", "true", "on"].includes(
+    (sp.get("includeBlocked") ?? "").trim().toLowerCase(),
+  );
+
   const sort: JobsFilters["sort"] = sp.get("sort") === "posted" ? "posted" : "";
 
   const pageRaw = parseInt(sp.get("page") ?? "1", 10);
@@ -152,6 +160,7 @@ function parseFiltersFromParams(sp: URLSearchParams): JobsFilters {
     budgetMin,
     budgetMax,
     budgetIncludeUnknown,
+    includeBlocked,
     sort,
     page,
     pageSize,
@@ -171,6 +180,8 @@ function buildQueryString(f: JobsFilters): string {
   // 見積フィルタ適用中に「金額不明を除外」のときだけ URL に出す（既定 true は省略）。
   const budgetActive = Boolean(f.budgetMin.trim() || f.budgetMax.trim());
   if (budgetActive && !f.budgetIncludeUnknown) u.set("budgetIncludeUnknown", "0");
+  // 既定（除外）は省略。ブロック済みも表示するときだけ URL に出す。
+  if (f.includeBlocked) u.set("includeBlocked", "1");
   if (f.sort) u.set("sort", f.sort);
   if (f.page > 1) u.set("page", String(f.page));
   if (f.pageSize !== DEFAULT_PAGE_SIZE) u.set("limit", String(f.pageSize));
@@ -221,6 +232,7 @@ type JobsListPayload = {
     max: number | null;
     includeUnknown: boolean;
   };
+  blockFilter: { includeBlocked: boolean; blockedClients: number };
 };
 
 type RowStats = JobLiveStats | { loading: true } | { error: string };
@@ -882,6 +894,8 @@ function JobsPageInner() {
   const [budgetIncludeUnknown, setBudgetIncludeUnknown] = React.useState(
     initialFilters.budgetIncludeUnknown,
   );
+  // ブロック済みクライアントの案件も表示するか。既定 false（除外）。
+  const [includeBlocked, setIncludeBlocked] = React.useState(initialFilters.includeBlocked);
   const [sort, setSort] = React.useState<"" | "posted">(initialFilters.sort);
   const [page, setPage] = React.useState(initialFilters.page);
   const [pageSize, setPageSize] = React.useState(initialFilters.pageSize);
@@ -952,7 +966,7 @@ function JobsPageInner() {
     setLiveStatsMap({});
     setStatusOverrides({});
     setAmountOverrides({});
-  }, [q, boardPf, boardCat, statusFilter, selectedKeywords, budgetMin, budgetMax, budgetIncludeUnknown, sort]);
+  }, [q, boardPf, boardCat, statusFilter, selectedKeywords, budgetMin, budgetMax, budgetIncludeUnknown, includeBlocked, sort]);
 
   const handleBulkLiveStats = async () => {
     if (bulkFetching || listJobs.length === 0) return;
@@ -992,6 +1006,7 @@ function JobsPageInner() {
       budgetMin,
       budgetMax,
       budgetIncludeUnknown,
+      includeBlocked,
       sort,
       page,
       pageSize,
@@ -1005,6 +1020,7 @@ function JobsPageInner() {
       budgetMin,
       budgetMax,
       budgetIncludeUnknown,
+      includeBlocked,
       sort,
       page,
       pageSize,
@@ -1228,6 +1244,16 @@ function JobsPageInner() {
                   金額不明を除外
                 </Badge>
               ) : null}
+            </div>
+          ) : null}
+          {data && !data.blockFilter.includeBlocked && data.blockFilter.blockedClients > 0 ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="inline-flex items-center gap-1 text-xs text-red-700 dark:text-red-400">
+                <BanIcon className="size-3.5 shrink-0" aria-hidden />
+                ブロック済みクライアント
+                <span className="tabular-nums font-medium">{data.blockFilter.blockedClients}</span>
+                件の案件を除外中
+              </span>
             </div>
           ) : null}
         </div>
@@ -1552,6 +1578,18 @@ function JobsPageInner() {
                 <SelectItem value="posted">Posted time ↓</SelectItem>
               </SelectContent>
             </Select>
+            <label
+              className="flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-zinc-200 px-3 text-sm text-zinc-700 dark:border-zinc-700 dark:text-zinc-300"
+              title="オンにすると、ブロックしたクライアントの案件も一覧に表示します。"
+            >
+              <BanIcon className="size-4 shrink-0 text-red-500 dark:text-red-400" aria-hidden />
+              <span className="whitespace-nowrap">ブロック済みも表示</span>
+              <Switch
+                checked={includeBlocked}
+                onCheckedChange={(v) => setIncludeBlocked(!!v)}
+                aria-label="ブロック済みクライアントの案件も表示する"
+              />
+            </label>
           </div>
         </CardHeader>
       </Card>

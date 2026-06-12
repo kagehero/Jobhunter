@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2Icon, CheckIcon, ExternalLinkIcon, SearchIcon, StarIcon, UserIcon, UsersRoundIcon } from "lucide-react";
+import { BanIcon, Building2Icon, CheckIcon, ExternalLinkIcon, SearchIcon, StarIcon, UserIcon, UsersRoundIcon } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -152,6 +152,48 @@ export default function ClientsAnalysisPage() {
       });
     },
     [entityMut],
+  );
+
+  // クライアントのブロック切替。profileKey 単位で保存し、一覧とジョブ一覧を再取得。
+  const blockMut = useMutation({
+    mutationFn: async (payload: {
+      profileKey: string;
+      blocked: boolean;
+      platform?: string;
+      displayName?: string;
+    }) => {
+      const res = await fetch("/api/client-analysis/block", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error?.message ?? "保存に失敗しました");
+      return json.data;
+    },
+    onSuccess: (data: { blocked: boolean }) => {
+      toast.success(data.blocked ? "ブロックしました" : "ブロックを解除しました");
+      void qc.invalidateQueries({ queryKey: ["client-analysis"] });
+      // ジョブ一覧の除外結果も更新する。
+      void qc.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const handleToggleBlock = React.useCallback(
+    (row: ClientAnalysisRow, blocked: boolean) => {
+      if (!row.profilePath) {
+        toast.error("プロフィールURLのあるクライアントのみブロックできます");
+        return;
+      }
+      blockMut.mutate({
+        profileKey: row.profilePath,
+        blocked,
+        platform: row.platforms[0],
+        displayName: row.displayName,
+      });
+    },
+    [blockMut],
   );
 
   const [detailRow, setDetailRow] = React.useState<ClientAnalysisRow | null>(null);
@@ -348,6 +390,8 @@ export default function ClientsAnalysisPage() {
                         onOpenDetail={() => setDetailRow(c)}
                         onSetEntity={handleSetEntity}
                         entityPending={entityMut.isPending}
+                        onToggleBlock={handleToggleBlock}
+                        blockPending={blockMut.isPending}
                       />
                     ))
                   )}
@@ -471,6 +515,15 @@ function ClientDetailModal({
               <Badge variant="outline" className="font-normal">
                 {kindLabel}
               </Badge>
+              {row.blocked ? (
+                <span
+                  className="inline-flex items-center gap-1 rounded-md border border-red-300/60 bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"
+                  title="ブロック中（ジョブ一覧から除外）"
+                >
+                  <BanIcon className="size-3 shrink-0" aria-hidden />
+                  ブロック中
+                </span>
+              ) : null}
               {[...row.platforms].sort(comparePlatformOrder).map((p) => {
                 const chip = platformChipStyles(p);
                 return (
@@ -755,16 +808,20 @@ function ClientTableRow({
   onOpenDetail,
   onSetEntity,
   entityPending,
+  onToggleBlock,
+  blockPending,
 }: {
   row: ClientAnalysisRow;
   onOpenDetail: () => void;
   onSetEntity: (row: ClientAnalysisRow, entityType: ClientEntityType) => void;
   entityPending: boolean;
+  onToggleBlock: (row: ClientAnalysisRow, blocked: boolean) => void;
+  blockPending: boolean;
 }) {
   const profileHref = absoluteProfileUrl(row.platforms, row.profilePath);
 
   return (
-    <TableRow className="align-top">
+    <TableRow className={cn("align-top", row.blocked && "opacity-60")}>
       <TableCell>
         <button
           type="button"
@@ -773,7 +830,16 @@ function ClientTableRow({
           className="flex min-w-0 max-w-[min(240px,40vw)] items-center gap-2.5 rounded-lg text-left outline-none ring-offset-2 transition hover:bg-zinc-100 focus-visible:ring-2 focus-visible:ring-zinc-400/80 dark:ring-offset-zinc-950 dark:hover:bg-zinc-900"
         >
           <ClientAvatar src={row.avatarUrl} displayName={row.displayName} size="sm" />
-          <span className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{row.displayName}</span>
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{row.displayName}</span>
+          {row.blocked ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 rounded border border-red-300/60 bg-red-50 px-1 py-0.5 text-[10px] font-medium text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300"
+              title="ブロック中（ジョブ一覧から除外）"
+            >
+              <BanIcon className="size-2.5 shrink-0" aria-hidden />
+              ブロック
+            </span>
+          ) : null}
         </button>
       </TableCell>
       <TableCell>
@@ -847,7 +913,49 @@ function ClientTableRow({
         >
           最新求人
         </a>
+        <ClientBlockButton row={row} onToggleBlock={onToggleBlock} pending={blockPending} />
       </TableCell>
     </TableRow>
+  );
+}
+
+/** クライアントのブロック切替ボタン。プロフィールURLのないクライアントは保存キーが無いため不可。 */
+function ClientBlockButton({
+  row,
+  onToggleBlock,
+  pending,
+}: {
+  row: ClientAnalysisRow;
+  onToggleBlock: (row: ClientAnalysisRow, blocked: boolean) => void;
+  pending: boolean;
+}) {
+  const canBlock = Boolean(row.profilePath);
+  if (!canBlock) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onToggleBlock(row, !row.blocked)}
+      disabled={pending}
+      aria-label={
+        row.blocked
+          ? `${row.displayName} のブロックを解除`
+          : `${row.displayName} をブロック（ジョブ一覧から除外）`
+      }
+      className={cn(
+        "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] transition disabled:opacity-50",
+        row.blocked
+          ? "border-zinc-300 bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700"
+          : "border-red-300/60 bg-red-50 text-red-700 hover:bg-red-100 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300 dark:hover:bg-red-500/20",
+      )}
+      title={
+        row.blocked
+          ? "ブロック中。クリックで解除（ジョブ一覧に再表示）"
+          : "ブロックするとジョブ一覧から除外されます"
+      }
+    >
+      <BanIcon className="size-3 shrink-0" aria-hidden />
+      {row.blocked ? "解除" : "ブロック"}
+    </button>
   );
 }

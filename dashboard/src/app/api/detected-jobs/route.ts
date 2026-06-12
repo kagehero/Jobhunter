@@ -152,7 +152,34 @@ export async function GET(req: Request) {
   const page = Number.isFinite(pageRaw) && pageRaw >= 1 ? pageRaw : 1;
   const limit = Math.min(Math.max(Number.isFinite(limitRaw) && limitRaw >= 1 ? limitRaw : 20, 1), 100);
 
+  // ブロック済みクライアントの案件を除外するか。既定は除外（true）。
+  // includeBlocked=1/true/on のときだけブロック済みも表示する。
+  const includeBlocked = ["1", "true", "on"].includes(
+    (searchParams.get("includeBlocked") ?? "").trim().toLowerCase(),
+  );
+
   const andBlocks: Prisma.DetectedJobWhereInput[] = [];
+
+  // ブロック済みクライアント（ClientProfile.blocked）の profileKey を集める。
+  // DetectedJob.clientProfileUrl は生のURL/パスで、ClientProfile.profileKey は
+  // normalizeProfileKey 済みのため、``contains`` で正規化パスを部分一致させて除外する。
+  let blockedClientCount = 0;
+  if (!includeBlocked) {
+    const blocked = await db.clientProfile.findMany({
+      where: { blocked: true },
+      select: { profileKey: true },
+    });
+    blockedClientCount = blocked.length;
+    if (blocked.length > 0) {
+      andBlocks.push({
+        NOT: {
+          OR: blocked.map((b) => ({
+            clientProfileUrl: { contains: b.profileKey, mode: "insensitive" as const },
+          })),
+        },
+      });
+    }
+  }
 
   if (q) {
     andBlocks.push({
@@ -285,5 +312,9 @@ export async function GET(req: Request) {
       max: budgetMax,
       includeUnknown: budgetIncludeUnknown,
     },
+    // ブロック済みクライアントの除外状態。
+    //  - includeBlocked  : ブロック済みも表示しているか
+    //  - blockedClients  : ブロック済みクライアント数（除外適用時のみ集計）
+    blockFilter: { includeBlocked, blockedClients: blockedClientCount },
   });
 }
