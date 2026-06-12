@@ -31,6 +31,22 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 type CategoryLegendItem = { dataKey: string; label: string };
 
+/** トレンドの集計粒度（時間別／日別／月別）。 */
+type TrendGranularity = "hour" | "day" | "month";
+
+const GRANULARITY_OPTIONS: { value: TrendGranularity; label: string }[] = [
+  { value: "hour", label: "時間別" },
+  { value: "day", label: "日別" },
+  { value: "month", label: "月別" },
+];
+
+/** 粒度ごとの窓の説明（カード見出し下に出す補足）。 */
+const GRANULARITY_HINT: Record<TrendGranularity, string> = {
+  hour: "直近24時間（1時間ごと）",
+  day: "直近7日（1日ごと）",
+  month: "直近12か月（1か月ごと）",
+};
+
 type Stats = {
   activeSources: number;
   jobsToday: number;
@@ -48,10 +64,12 @@ type Stats = {
     errorMessage: string | null;
     urlSlice: string;
   }>;
-  /** 検出求人（日別・プラットフォーム桶 + 一覧大分類桶）— Recharts が参照するフラットキー */
+  /** 検出求人トレンド（バケット別・プラットフォーム桶 + 一覧大分類桶）— Recharts が参照するフラットキー */
   jobsPerDay: Record<string, string | number>[];
   /** カテゴリ積み上げ用（システム / Web） */
   categoryStackLegend: CategoryLegendItem[];
+  /** 現在の集計粒度（X軸ラベルの意味づけ）。 */
+  trendGranularity: TrendGranularity;
   scrapeSpark: { tick: number; success: number }[];
   generatedAt: string;
 };
@@ -65,16 +83,24 @@ const PLATFORM_SERIES = [
 const CATEGORY_STACK_COLORS = ["#fb7185", "#34d399", "#fbbf24"];
 
 export default function OverviewPage() {
+  // トレンドの集計粒度（時間別／日別／月別）。既定は日別。
+  const [granularity, setGranularity] = React.useState<TrendGranularity>("day");
+
   const { data, isLoading } = useQuery({
-    queryKey: ["dashboard-stats"],
+    queryKey: ["dashboard-stats", granularity],
     queryFn: async () => {
-      const res = await fetch("/api/dashboard/stats", { cache: "no-store" });
+      const res = await fetch(`/api/dashboard/stats?granularity=${granularity}`, {
+        cache: "no-store",
+      });
       const body = await res.json();
       if (!body.ok) throw new Error(body.error?.message ?? "Failed");
       return body.data as Stats;
     },
     refetchInterval: 120_000,
+    placeholderData: (prev) => prev,
   });
+
+  const granularityHint = GRANULARITY_HINT[granularity];
 
   const statSkeleton = Array.from({ length: 4 }).map((_, i) => (
     <Skeleton key={i} className="h-32 w-full" />
@@ -121,12 +147,20 @@ export default function OverviewPage() {
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{isLoading ? statSkeleton : cards}</div>
 
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">トレンド集計</h2>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">{granularityHint}</p>
+        </div>
+        <TrendGranularityToggle value={granularity} onChange={setGranularity} />
+      </div>
+
       <div className="grid gap-4 xl:grid-cols-7">
         <Card className="border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950 xl:col-span-4">
           <CardHeader className="pb-0">
             <CardTitle>Jobs discovered</CardTitle>
             <CardDescription>
-              積み上げはプラットフォーム別と、一覧URLから解釈した大分類（システム / Web）。
+              {granularityHint}・積み上げはプラットフォーム別と、一覧URLから解釈した大分類（システム / Web / AI）。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-8 pt-6">
@@ -210,7 +244,7 @@ export default function OverviewPage() {
         <Card className="border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950 xl:col-span-3">
           <CardHeader className="pb-0">
             <CardTitle>Trend</CardTitle>
-            <CardDescription>左と同じ日次系列を折れ線（合計・PF別・大分類別）</CardDescription>
+            <CardDescription>左と同じ系列を折れ線（合計・PF別・大分類別）・{granularityHint}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-8 pt-6">
             {isLoading ? (
@@ -348,6 +382,42 @@ export default function OverviewPage() {
           Snapshot {new Date(data.generatedAt).toLocaleString()}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/** 時間別／日別／月別を切り替えるセグメントトグル。 */
+function TrendGranularityToggle({
+  value,
+  onChange,
+}: {
+  value: TrendGranularity;
+  onChange: (next: TrendGranularity) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="トレンドの集計粒度"
+      className="inline-flex items-center gap-0.5 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-900"
+    >
+      {GRANULARITY_OPTIONS.map((opt) => {
+        const active = opt.value === value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            aria-pressed={active}
+            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+              active
+                ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50"
+                : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+            }`}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
