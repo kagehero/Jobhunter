@@ -5,9 +5,7 @@ import {
   LineChartIcon,
   SearchIcon,
   CommandIcon,
-  HistoryIcon,
   MoonIcon,
-  SendIcon,
   SettingsIcon,
   SunIcon,
   UsersRoundIcon,
@@ -33,8 +31,6 @@ const nav = [
   { href: "/jobs", label: "Jobs", icon: SearchIcon, section: "Monitor" },
   { href: "/clients", label: "Client analysis", icon: UsersRoundIcon, section: "Monitor" },
   { href: "/sources", label: "Sources", icon: LayersIcon, section: "Operate" },
-  { href: "/history", label: "Scrape history", icon: HistoryIcon, section: "Operate" },
-  { href: "/discord", label: "Discord delivery", icon: SendIcon, section: "Operate" },
   { href: "/settings", label: "Settings", icon: SettingsIcon, section: "Operate" },
 ] as const;
 

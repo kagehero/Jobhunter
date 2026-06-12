@@ -3,11 +3,9 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Command as CommandPrimitive } from "cmdk";
 import {
-  HistoryIcon,
   LayersIcon,
   LineChartIcon,
   SearchIcon,
-  SendIcon,
   SettingsIcon,
   UsersRoundIcon,
 } from "lucide-react";
@@ -24,8 +22,6 @@ const links = [
   { label: "Jobs", href: "/jobs", icon: SearchIcon },
   { label: "Client analysis", href: "/clients", icon: UsersRoundIcon },
   { label: "Sources", href: "/sources", icon: LayersIcon },
-  { label: "Scrape history", href: "/history", icon: HistoryIcon },
-  { label: "Discord delivery", href: "/discord", icon: SendIcon },
   { label: "Settings", href: "/settings", icon: SettingsIcon },
 ];
 
