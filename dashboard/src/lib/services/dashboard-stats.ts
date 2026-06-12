@@ -3,7 +3,26 @@ import { DiscordDeliveryStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { bucketPlatformForStats, jobBoardCategoryTriple, postingCategoryTripleChartKey } from "@/lib/posting-board-meta";
 
-const TREND_DAYS = 7;
+/** トレンドの集計粒度。UI のトグル（時間別／日別／月別）と対応。 */
+export type TrendGranularity = "hour" | "day" | "month";
+
+export const TREND_GRANULARITIES: TrendGranularity[] = ["hour", "day", "month"];
+
+/** 既定の粒度（後方互換: 従来の「日別 7 日」）。 */
+export const DEFAULT_TREND_GRANULARITY: TrendGranularity = "day";
+
+/** 各粒度で遡るバケット数（24h / 7日 / 12か月）。 */
+const TREND_BUCKETS: Record<TrendGranularity, number> = {
+  hour: 24,
+  day: 7,
+  month: 12,
+};
+
+export function normalizeTrendGranularity(raw: string | null | undefined): TrendGranularity {
+  const v = raw?.trim().toLowerCase();
+  if (v === "hour" || v === "day" || v === "month") return v;
+  return DEFAULT_TREND_GRANULARITY;
+}
 
 const CATEGORY_STACK_META: CategoryStackMetaItem[] = [
   { dataKey: postingCategoryTripleChartKey("system"), label: "システム" },
@@ -12,6 +31,7 @@ const CATEGORY_STACK_META: CategoryStackMetaItem[] = [
 ];
 
 export type DashboardJobsPerDayRow = {
+  /** バケットラベル（X軸）。粒度により「14時」「6/12」「2026/06」等。 */
   day: string;
   count: number;
   pl_lancers: number;
@@ -26,7 +46,139 @@ export type CategoryStackMetaItem = {
   label: string;
 };
 
-export async function getDashboardStatsBundle() {
+type TrendBucketAgg = {
+  total: number;
+  lw: number;
+  cw: number;
+  cat: Map<string, number>;
+};
+
+function emptyTrendBucketAgg(): TrendBucketAgg {
+  return { total: 0, lw: 0, cw: 0, cat: new Map() };
+}
+
+/** 粒度に応じたバケット開始時刻の配列（古い→新しい順）と、各種ヘルパー。 */
+function buildTrendBucketStarts(granularity: TrendGranularity): {
+  starts: Date[];
+  /** 次バケット開始（範囲上限）を返す。 */
+  nextStart: (d: Date) => Date;
+  /** X軸ラベル。 */
+  label: (d: Date) => string;
+} {
+  const count = TREND_BUCKETS[granularity];
+  const starts: Date[] = [];
+
+  if (granularity === "hour") {
+    const base = new Date();
+    base.setMinutes(0, 0, 0);
+    for (let idx = count - 1; idx >= 0; idx--) {
+      starts.push(new Date(base.getTime() - idx * 3600_000));
+    }
+    return {
+      starts,
+      nextStart: (d) => new Date(d.getTime() + 3600_000),
+      label: (d) => `${d.getHours()}時`,
+    };
+  }
+
+  if (granularity === "month") {
+    const base = new Date();
+    base.setDate(1);
+    base.setHours(0, 0, 0, 0);
+    for (let idx = count - 1; idx >= 0; idx--) {
+      const s = new Date(base);
+      s.setMonth(s.getMonth() - idx);
+      starts.push(s);
+    }
+    return {
+      starts,
+      nextStart: (d) => {
+        const e = new Date(d);
+        e.setMonth(e.getMonth() + 1);
+        return e;
+      },
+      label: (d) => `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}`,
+    };
+  }
+
+  // day（既定）。
+  const base = new Date();
+  base.setHours(0, 0, 0, 0);
+  for (let idx = count - 1; idx >= 0; idx--) {
+    const s = new Date(base);
+    s.setDate(s.getDate() - idx);
+    starts.push(s);
+  }
+  return {
+    starts,
+    nextStart: (d) => {
+      const e = new Date(d);
+      e.setDate(e.getDate() + 1);
+      return e;
+    },
+    label: (d) => `${d.getMonth() + 1}/${d.getDate()}`,
+  };
+}
+
+/**
+ * 指定粒度で検出求人を集計し、Recharts 用のフラット行に変換する。
+ * バケットの開始時刻配列を作り、求人を線形走査で振り分ける（バケット数は最大 24 と小さい）。
+ */
+async function buildJobsTrend(
+  granularity: TrendGranularity,
+): Promise<DashboardJobsPerDayRow[]> {
+  const { starts, nextStart, label } = buildTrendBucketStarts(granularity);
+  const rangeStart = starts[0]!;
+  const rangeEnd = nextStart(starts[starts.length - 1]!);
+
+  const buckets = starts.map((s) => ({
+    start: s,
+    end: nextStart(s),
+    agg: emptyTrendBucketAgg(),
+  }));
+
+  const jobsInWindow = await db.detectedJob.findMany({
+    where: { detectedAt: { gte: rangeStart, lt: rangeEnd } },
+    select: {
+      detectedAt: true,
+      source: { select: { platform: true, url: true } },
+    },
+  });
+
+  for (const job of jobsInWindow) {
+    const ts = job.detectedAt.getTime();
+    const bucket = buckets.find((b) => ts >= b.start.getTime() && ts < b.end.getTime());
+    if (!bucket) continue;
+    const b = bucket.agg;
+    b.total++;
+    const plat = bucketPlatformForStats(job.source.platform);
+    if (plat === "lancers") b.lw++;
+    else if (plat === "crowdworks") b.cw++;
+
+    const triple = jobBoardCategoryTriple(job.source.platform, job.source.url);
+    if (triple === "system" || triple === "web" || triple === "ai") {
+      const ck = postingCategoryTripleChartKey(triple);
+      b.cat.set(ck, (b.cat.get(ck) ?? 0) + 1);
+    }
+  }
+
+  return buckets.map(({ start, agg }) => {
+    const row: DashboardJobsPerDayRow = {
+      day: label(start),
+      count: agg.total,
+      pl_lancers: agg.lw,
+      pl_crowdworks: agg.cw,
+    };
+    for (const { dataKey } of CATEGORY_STACK_META) {
+      row[dataKey] = agg.cat.get(dataKey) ?? 0;
+    }
+    return row;
+  });
+}
+
+export async function getDashboardStatsBundle(
+  granularity: TrendGranularity = DEFAULT_TREND_GRANULARITY,
+) {
   const startUtcDay = new Date();
   startUtcDay.setUTCHours(0, 0, 0, 0);
 
@@ -77,86 +229,8 @@ export async function getDashboardStatsBundle() {
     .filter((n) => n > 0 && n < 600);
   const avgLatencySec = durSec.length ? durSec.reduce((a, b) => a + b, 0) / durSec.length : null;
 
-  type DayAgg = {
-    total: number;
-    lw: number;
-    cw: number;
-    cat: Map<string, number>;
-  };
-
-  function emptyDayAgg(): DayAgg {
-    return { total: 0, lw: 0, cw: 0, cat: new Map() };
-  }
-
-  const dayStarts: Date[] = [];
-  for (let idx = TREND_DAYS - 1; idx >= 0; idx--) {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    start.setDate(start.getDate() - idx);
-    dayStarts.push(start);
-  }
-
-  const rangeStart = dayStarts[0]!;
-  const rangeEnd = new Date(dayStarts[TREND_DAYS - 1]!);
-  rangeEnd.setDate(rangeEnd.getDate() + 1);
-
-  function dayLabel(d: Date): string {
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  }
-
-  const buckets = new Map<string, DayAgg>();
-  for (const ds of dayStarts) buckets.set(dayLabel(ds), emptyDayAgg());
-
-  const jobsInWindow = await db.detectedJob.findMany({
-    where: { detectedAt: { gte: rangeStart, lt: rangeEnd } },
-    select: {
-      detectedAt: true,
-      source: { select: { platform: true, url: true } },
-    },
-  });
-
-  for (const job of jobsInWindow) {
-    const ts = job.detectedAt.getTime();
-    let matchedStart: Date | null = null;
-    for (const s of dayStarts) {
-      const e = new Date(s);
-      e.setDate(e.getDate() + 1);
-      if (ts >= s.getTime() && ts < e.getTime()) {
-        matchedStart = s;
-        break;
-      }
-    }
-    if (!matchedStart) continue;
-    const dk = dayLabel(matchedStart);
-    const b = buckets.get(dk);
-    if (!b) continue;
-    b.total++;
-    const plat = bucketPlatformForStats(job.source.platform);
-    if (plat === "lancers") b.lw++;
-    else if (plat === "crowdworks") b.cw++;
-
-    const triple = jobBoardCategoryTriple(job.source.platform, job.source.url);
-    if (triple === "system" || triple === "web" || triple === "ai") {
-      const ck = postingCategoryTripleChartKey(triple);
-      b.cat.set(ck, (b.cat.get(ck) ?? 0) + 1);
-    }
-  }
-
-  const jobsPerDay: DashboardJobsPerDayRow[] = dayStarts.map((ds) => {
-    const dk = dayLabel(ds);
-    const b = buckets.get(dk)!;
-    const row: DashboardJobsPerDayRow = {
-      day: dk,
-      count: b.total,
-      pl_lancers: b.lw,
-      pl_crowdworks: b.cw,
-    };
-    for (const { dataKey } of CATEGORY_STACK_META) {
-      row[dataKey] = b.cat.get(dataKey) ?? 0;
-    }
-    return row;
-  });
-
+  // 検出求人トレンド（指定粒度: 時間別 24h / 日別 7日 / 月別 12か月）。
+  const jobsPerDay = await buildJobsTrend(granularity);
   const categoryStackLegend: CategoryStackMetaItem[] = CATEGORY_STACK_META;
 
   const sliceWeek = scrapeWeek.slice(-48);
@@ -186,6 +260,8 @@ export async function getDashboardStatsBundle() {
     recentActivity,
     jobsPerDay,
     categoryStackLegend,
+    /** トレンドの集計粒度（X軸ラベルの意味づけ・UIトグルの現在値）。 */
+    trendGranularity: granularity,
     scrapeSpark,
     generatedAt: new Date().toISOString(),
   };
