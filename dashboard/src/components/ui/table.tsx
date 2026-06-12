@@ -14,7 +14,15 @@ export function Table(props: React.TableHTMLAttributes<HTMLTableElement>) {
 }
 
 export function TableHeader({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn("[&_tr]:border-b", className)} {...props} />;
+  return (
+    <thead
+      className={cn(
+        "[&_tr]:border-b [&_tr]:border-zinc-200 [&_tr:hover]:bg-transparent dark:[&_tr]:border-zinc-800",
+        className,
+      )}
+      {...props}
+    />
+  );
 }
 
 export function TableBody({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -38,7 +46,7 @@ export function TableHead({ className, ...props }: React.ThHTMLAttributes<HTMLTa
     <th
       {...props}
       className={cn(
-        "h-11 px-3 text-left align-middle text-xs font-medium text-zinc-500 dark:text-zinc-400",
+        "h-11 px-3 text-left align-middle text-[11px] font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400",
         className,
       )}
     />

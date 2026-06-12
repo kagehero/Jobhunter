@@ -8,10 +8,15 @@ import {
   ArrowUpRightIcon,
   BellIcon,
   BrainCircuitIcon,
+  MinusIcon,
   ShieldAlertIcon,
   TimerIcon,
+  TrendingDownIcon,
+  TrendingUpIcon,
 } from "lucide-react";
 import {
+  Area,
+  AreaChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -82,6 +87,46 @@ const PLATFORM_SERIES = [
 // system / web / ai の順（dashboard-stats CATEGORY_STACK_META と対応）。
 const CATEGORY_STACK_COLORS = ["#fb7185", "#34d399", "#fbbf24"];
 
+/** CoinMarketCap 風の合計エリアの基調色（緑＝増加トーン）。 */
+const TOTAL_AREA_COLOR = "#22c55e";
+
+/** チャート共通の控えめなグリッド・軸スタイル（CMC 風に最小限の罫線）。 */
+const AXIS_TICK = { fontSize: 11, fill: "#a1a1aa" } as const;
+
+/** CMC 風の暗色 Tooltip。全チャートで共通利用。 */
+const TOOLTIP_STYLE = {
+  borderRadius: 12,
+  border: "1px solid #27272a",
+  background: "#09090beb",
+  color: "#fafafa",
+  fontSize: 12,
+  boxShadow: "0 8px 24px -8px rgba(0,0,0,0.5)",
+} as const;
+
+/** 期間内の合計検出数（jobsPerDay の count 合計）。 */
+function sumTrendCount(rows: Record<string, string | number>[] | undefined): number {
+  if (!rows?.length) return 0;
+  return rows.reduce((acc, r) => acc + (typeof r.count === "number" ? r.count : 0), 0);
+}
+
+/** 直近バケットと、その1つ前のバケットの差分（前期比の増減）。 */
+function trendDelta(rows: Record<string, string | number>[] | undefined): {
+  last: number;
+  prev: number;
+  diff: number;
+  pct: number | null;
+} {
+  if (!rows || rows.length < 2) {
+    const last = rows?.length ? Number(rows[rows.length - 1]!.count) || 0 : 0;
+    return { last, prev: 0, diff: last, pct: null };
+  }
+  const last = Number(rows[rows.length - 1]!.count) || 0;
+  const prev = Number(rows[rows.length - 2]!.count) || 0;
+  const diff = last - prev;
+  const pct = prev === 0 ? null : (diff / prev) * 100;
+  return { last, prev, diff, pct };
+}
+
 export default function OverviewPage() {
   // トレンドの集計粒度（時間別／日別／月別）。既定は日別。
   const [granularity, setGranularity] = React.useState<TrendGranularity>("day");
@@ -101,6 +146,15 @@ export default function OverviewPage() {
   });
 
   const granularityHint = GRANULARITY_HINT[granularity];
+
+  // X軸ラベルの間引き間隔（CMC 風に均等表示）。
+  //  - 時間別(24本): 2 を挟んで 3 時間おき（3:00 AM, 6:00 AM, …／日付境界は「12 Jun」）。
+  //  - 日別(7本)・月別(12本): 全ラベル表示。
+  const xAxisInterval = granularity === "hour" ? 2 : 0;
+
+  // CMC 風の「現在価格」相当: 期間内の合計検出数と、直近バケットの前期比。
+  const trendTotal = sumTrendCount(data?.jobsPerDay);
+  const delta = trendDelta(data?.jobsPerDay);
 
   const statSkeleton = Array.from({ length: 4 }).map((_, i) => (
     <Skeleton key={i} className="h-32 w-full" />
@@ -136,21 +190,40 @@ export default function OverviewPage() {
       <div className="space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">Overview</h1>
-          <Badge variant="secondary" className="hidden sm:inline-flex">
-            realtime / 120s polling
+          <Badge variant="success" className="hidden sm:inline-flex">
+            <span className="relative flex size-1.5">
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500 opacity-75" />
+              <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
+            </span>
+            Live · 120s polling
           </Badge>
         </div>
         <p className="max-w-2xl text-sm text-zinc-500 dark:text-zinc-400">
-          Monitor scraper fidelity, ingestion volume, and Discord fan-out in a single operations surface.
+          スクレイパの稼働状況・取り込み量・Discord 配信を 1 画面で監視します。
         </p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">{isLoading ? statSkeleton : cards}</div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="space-y-0.5">
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">トレンド集計</h2>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">{granularityHint}</p>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="space-y-1">
+          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+            検出求人トレンド · {granularityHint}
+          </p>
+          <div className="flex flex-wrap items-baseline gap-3">
+            {isLoading && !data ? (
+              <Skeleton className="h-10 w-28" />
+            ) : (
+              <span className="text-4xl font-semibold tabular-nums text-zinc-900 dark:text-zinc-50">
+                {trendTotal.toLocaleString()}
+                <span className="ml-1.5 text-base font-normal text-zinc-400">件</span>
+              </span>
+            )}
+            {!isLoading || data ? <TrendDeltaBadge delta={delta} /> : null}
+          </div>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400">
+            期間内の合計検出数。バッジは直近{granularity === "hour" ? "1時間" : granularity === "month" ? "1か月" : "1日"}の前期比です。
+          </p>
         </div>
         <TrendGranularityToggle value={granularity} onChange={setGranularity} />
       </div>
@@ -174,19 +247,27 @@ export default function OverviewPage() {
                   </p>
                   <div className="h-[212px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={data?.jobsPerDay}>
-                        <CartesianGrid strokeDasharray="4 12" opacity={0.2} vertical={false} />
-                        <XAxis dataKey="day" stroke="#71717a" />
-                        <YAxis stroke="#71717a" />
-                        <Tooltip
-                          cursor={{ fill: "#18181b10" }}
-                          contentStyle={{
-                            borderRadius: 10,
-                            border: "1px solid #27272a",
-                            background: "#09090bdc",
-                            color: "#fafafa",
-                          }}
+                      <BarChart data={data?.jobsPerDay} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.12} vertical={false} />
+                        <XAxis
+                          dataKey="day"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          interval={xAxisInterval}
+                          minTickGap={16}
                         />
+                        <YAxis
+                          orientation="right"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          width={36}
+                          allowDecimals={false}
+                        />
+                        <Tooltip cursor={{ fill: "#71717a18" }} contentStyle={TOOLTIP_STYLE} />
                         <Legend wrapperStyle={{ fontSize: "11px" }} />
                         {PLATFORM_SERIES.map((s) => (
                           <Bar
@@ -208,19 +289,27 @@ export default function OverviewPage() {
                   </p>
                   <div className="h-[212px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={data?.jobsPerDay}>
-                        <CartesianGrid strokeDasharray="4 12" opacity={0.2} vertical={false} />
-                        <XAxis dataKey="day" stroke="#71717a" />
-                        <YAxis stroke="#71717a" />
-                        <Tooltip
-                          cursor={{ fill: "#18181b10" }}
-                          contentStyle={{
-                            borderRadius: 10,
-                            border: "1px solid #27272a",
-                            background: "#09090bdc",
-                            color: "#fafafa",
-                          }}
+                      <BarChart data={data?.jobsPerDay} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.12} vertical={false} />
+                        <XAxis
+                          dataKey="day"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          interval={xAxisInterval}
+                          minTickGap={16}
                         />
+                        <YAxis
+                          orientation="right"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          width={36}
+                          allowDecimals={false}
+                        />
+                        <Tooltip cursor={{ fill: "#71717a18" }} contentStyle={TOOLTIP_STYLE} />
                         <Legend wrapperStyle={{ fontSize: "11px" }} />
                         {(data?.categoryStackLegend ?? []).map(({ dataKey, label }, idx) => (
                           <Bar
@@ -253,36 +342,62 @@ export default function OverviewPage() {
               <>
                 <div className="space-y-2">
                   <p className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-                    Detected · platform
+                    合計検出（エリア）+ プラットフォーム別
                   </p>
                   <div className="h-[200px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={data?.jobsPerDay}>
-                        <CartesianGrid strokeDasharray="4 12" opacity={0.15} vertical={false} />
-                        <XAxis dataKey="day" stroke="#71717a" />
-                        <YAxis stroke="#71717a" />
-                        <Tooltip
-                          contentStyle={{
-                            borderRadius: 10,
-                            border: "1px solid #27272a",
-                            background: "#09090bdc",
-                            color: "#fafafa",
-                          }}
+                      <AreaChart data={data?.jobsPerDay} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="trendTotalFill" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor={TOTAL_AREA_COLOR} stopOpacity={0.32} />
+                            <stop offset="100%" stopColor={TOTAL_AREA_COLOR} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.12} vertical={false} />
+                        <XAxis
+                          dataKey="day"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          interval={xAxisInterval}
+                          minTickGap={16}
                         />
+                        <YAxis
+                          orientation="right"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          width={36}
+                          allowDecimals={false}
+                        />
+                        <Tooltip cursor={{ stroke: "#52525b", strokeWidth: 1 }} contentStyle={TOOLTIP_STYLE} />
                         <Legend wrapperStyle={{ fontSize: "11px" }} />
-                        <Line dot={false} type="monotone" dataKey="count" name="合計検出" stroke="#e4e4e7" strokeWidth={2} />
+                        <Area
+                          type="monotone"
+                          dataKey="count"
+                          name="合計検出"
+                          stroke={TOTAL_AREA_COLOR}
+                          strokeWidth={2}
+                          fill="url(#trendTotalFill)"
+                          dot={false}
+                          activeDot={{ r: 3 }}
+                        />
                         {PLATFORM_SERIES.map((s) => (
-                          <Line
+                          <Area
                             key={s.dataKey}
-                            dot={false}
                             type="monotone"
                             dataKey={s.dataKey}
                             name={s.label}
                             stroke={s.fill}
-                            strokeWidth={1.8}
+                            strokeWidth={1.6}
+                            fill="transparent"
+                            dot={false}
+                            activeDot={{ r: 3 }}
                           />
                         ))}
-                      </LineChart>
+                      </AreaChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
@@ -292,18 +407,27 @@ export default function OverviewPage() {
                   </p>
                   <div className="h-[200px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={data?.jobsPerDay}>
-                        <CartesianGrid strokeDasharray="4 12" opacity={0.15} vertical={false} />
-                        <XAxis dataKey="day" stroke="#71717a" />
-                        <YAxis stroke="#71717a" />
-                        <Tooltip
-                          contentStyle={{
-                            borderRadius: 10,
-                            border: "1px solid #27272a",
-                            background: "#09090bdc",
-                            color: "#fafafa",
-                          }}
+                      <LineChart data={data?.jobsPerDay} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="4 12" opacity={0.12} vertical={false} />
+                        <XAxis
+                          dataKey="day"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          interval={xAxisInterval}
+                          minTickGap={16}
                         />
+                        <YAxis
+                          orientation="right"
+                          stroke="transparent"
+                          tick={AXIS_TICK}
+                          tickLine={false}
+                          axisLine={false}
+                          width={36}
+                          allowDecimals={false}
+                        />
+                        <Tooltip cursor={{ stroke: "#52525b", strokeWidth: 1 }} contentStyle={TOOLTIP_STYLE} />
                         <Legend wrapperStyle={{ fontSize: "11px" }} />
                         {(data?.categoryStackLegend ?? []).map(({ dataKey, label }, idx) => (
                           <Line
@@ -314,6 +438,7 @@ export default function OverviewPage() {
                             name={label}
                             stroke={CATEGORY_STACK_COLORS[idx % CATEGORY_STACK_COLORS.length]}
                             strokeWidth={1.8}
+                            activeDot={{ r: 3 }}
                           />
                         ))}
                       </LineChart>
@@ -358,12 +483,17 @@ export default function OverviewPage() {
               ? Array.from({ length: 5 }).map((_, idx) => <Skeleton key={idx} className="my-3 h-14 w-full" />)
               : data?.recentActivity.map((evt) => (
                   <motion.div layout key={evt.id} className="flex gap-4 py-4">
-                    <div className={`mt-1 size-2 shrink-0 rounded-full ${evt.success ? "bg-emerald-500" : "bg-red-600"}`} />
+                    <div
+                      className={`mt-1.5 size-2 shrink-0 rounded-full ${evt.success ? "bg-emerald-500" : "bg-red-500"}`}
+                      aria-hidden
+                    />
                     <div className="min-w-0 flex-1 space-y-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-50">{evt.platform}</p>
-                        <Badge variant={evt.success ? "secondary" : "outline"}>{evt.success ? "OK" : "FAIL"}</Badge>
-                        <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{evt.jobsFound} jobs</p>
+                        <Badge variant={evt.success ? "success" : "danger"}>
+                          {evt.success ? "OK" : "FAIL"}
+                        </Badge>
+                        <p className="text-xs tabular-nums text-zinc-500">{evt.jobsFound} jobs</p>
                       </div>
                       <p className="truncate font-mono text-xs text-zinc-500">{evt.urlSlice}</p>
                       {!evt.success && evt.errorMessage ? (
@@ -386,6 +516,36 @@ export default function OverviewPage() {
   );
 }
 
+/** CMC 風の前期比バッジ（増=緑↑ / 減=赤↓ / 変化なし=灰−）。 */
+function TrendDeltaBadge({
+  delta,
+}: {
+  delta: { last: number; prev: number; diff: number; pct: number | null };
+}) {
+  const { diff, pct } = delta;
+  const up = diff > 0;
+  const down = diff < 0;
+  const Icon = up ? TrendingUpIcon : down ? TrendingDownIcon : MinusIcon;
+  const tone = up
+    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+    : down
+      ? "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"
+      : "border-zinc-300/60 bg-zinc-100 text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400";
+  const pctLabel = pct == null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+  const diffLabel = `${diff >= 0 ? "+" : ""}${diff.toLocaleString()}`;
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium tabular-nums ${tone}`}
+      title={`前期比 ${diffLabel} 件（${pctLabel}）`}
+    >
+      <Icon className="size-3.5 shrink-0" aria-hidden />
+      {diffLabel}
+      <span className="opacity-70">({pctLabel})</span>
+    </span>
+  );
+}
+
 /** 時間別／日別／月別を切り替えるセグメントトグル。 */
 function TrendGranularityToggle({
   value,
@@ -398,7 +558,7 @@ function TrendGranularityToggle({
     <div
       role="group"
       aria-label="トレンドの集計粒度"
-      className="inline-flex items-center gap-0.5 rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 dark:border-zinc-800 dark:bg-zinc-900"
+      className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-zinc-100/80 p-1 dark:border-zinc-800 dark:bg-zinc-900/80"
     >
       {GRANULARITY_OPTIONS.map((opt) => {
         const active = opt.value === value;
@@ -408,10 +568,10 @@ function TrendGranularityToggle({
             type="button"
             onClick={() => onChange(opt.value)}
             aria-pressed={active}
-            className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
               active
-                ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50"
-                : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                ? "bg-white text-zinc-900 shadow-sm ring-1 ring-zinc-900/5 dark:bg-zinc-700 dark:text-zinc-50 dark:ring-white/5"
+                : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
             }`}
           >
             {opt.label}

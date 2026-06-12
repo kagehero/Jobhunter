@@ -34,6 +34,13 @@ type DiscordRow = {
   projectUrl: string;
 };
 
+/** 配信ステータスをセマンティックな Badge バリアントに対応づける。 */
+function deliveryBadgeVariant(status: DiscordRow["status"]): "success" | "warning" | "danger" {
+  if (status === "SENT") return "success";
+  if (status === "FAILED") return "danger";
+  return "warning";
+}
+
 export default function DiscordPage() {
   const qc = useQueryClient();
   const [webhook, setWebhook] = useState("");
@@ -108,8 +115,10 @@ export default function DiscordPage() {
   return (
     <div className="space-y-6">
       <header className="space-y-2">
-        <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Discord fan-out</h1>
-        <p className="text-sm text-zinc-500">Webhook reliability, SLA cues, retries.</p>
+        <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Discord delivery</h1>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Webhook の配信状況・成功率・リトライを監視します。
+        </p>
       </header>
 
       <Card>
@@ -238,13 +247,9 @@ export default function DiscordPage() {
                         </a>
                       </TableCell>
                       <TableCell>
-                        {row.status === "FAILED" ? (
-                          <Badge variant="outline" className="border-red-500 text-red-600 dark:border-red-400 dark:text-red-300">
-                            {row.status.toLowerCase()}
-                          </Badge>
-                        ) : (
-                          <Badge variant="secondary">{row.status.toLowerCase()}</Badge>
-                        )}
+                        <Badge variant={deliveryBadgeVariant(row.status)} className="uppercase">
+                          {row.status.toLowerCase()}
+                        </Badge>
                       </TableCell>
                       <TableCell className="max-w-[200px] truncate font-mono text-xs text-zinc-500">{row.webhookUrl}</TableCell>
                       <TableCell className="text-xs text-zinc-500">{row.sentAt ? new Date(row.sentAt).toLocaleString() : "—"}</TableCell>

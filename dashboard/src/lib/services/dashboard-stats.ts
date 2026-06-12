@@ -57,6 +57,25 @@ function emptyTrendBucketAgg(): TrendBucketAgg {
   return { total: 0, lw: 0, cw: 0, cat: new Map() };
 }
 
+/** 月名（英語短縮）。CoinMarketCap 風の軸ラベル用。 */
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
+/** 12時間表記の時刻ラベル（例: 3:00 AM / 12:00 PM）。 */
+function clockLabel12h(d: Date): string {
+  const h24 = d.getHours();
+  const ampm = h24 < 12 ? "AM" : "PM";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${h12}:00 ${ampm}`;
+}
+
+/** 「日 月」ラベル（例: 12 Jun）。日付・月境界を示すのに使う。 */
+function dayMonthLabel(d: Date): string {
+  return `${d.getDate()} ${MONTH_ABBR[d.getMonth()]}`;
+}
+
 /** 粒度に応じたバケット開始時刻の配列（古い→新しい順）と、各種ヘルパー。 */
 function buildTrendBucketStarts(granularity: TrendGranularity): {
   starts: Date[];
@@ -77,7 +96,10 @@ function buildTrendBucketStarts(granularity: TrendGranularity): {
     return {
       starts,
       nextStart: (d) => new Date(d.getTime() + 3600_000),
-      label: (d) => `${d.getHours()}時`,
+      // CoinMarketCap 風: 時刻は 12時間表記（3:00 AM / 12:00 PM）。
+      // ただし日付境界（午前0時）のバケットは「日 月」（例: 12 Jun）にして
+      // 日をまたいだことを軸上で示す。
+      label: (d) => (d.getHours() === 0 ? dayMonthLabel(d) : clockLabel12h(d)),
     };
   }
 
@@ -97,7 +119,8 @@ function buildTrendBucketStarts(granularity: TrendGranularity): {
         e.setMonth(e.getMonth() + 1);
         return e;
       },
-      label: (d) => `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}`,
+      // CoinMarketCap 風: 「月 年」（例: Jun 2026）。
+      label: (d) => `${MONTH_ABBR[d.getMonth()]} ${d.getFullYear()}`,
     };
   }
 
@@ -116,7 +139,8 @@ function buildTrendBucketStarts(granularity: TrendGranularity): {
       e.setDate(e.getDate() + 1);
       return e;
     },
-    label: (d) => `${d.getMonth() + 1}/${d.getDate()}`,
+    // CoinMarketCap 風: 「日 月」（例: 12 Jun）。
+    label: (d) => dayMonthLabel(d),
   };
 }
 

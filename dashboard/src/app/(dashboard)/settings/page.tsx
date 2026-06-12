@@ -77,7 +77,9 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <header className="space-y-2">
         <h1 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-50">Settings</h1>
-        <p className="text-sm text-zinc-500">Operational toggles mirrored into `AppSetting` rows.</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          ダッシュボードの動作設定。変更は保存時にデータベースへ反映されます。
+        </p>
       </header>
 
       <Card>

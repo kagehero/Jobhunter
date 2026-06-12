@@ -3,9 +3,11 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Command as CommandPrimitive } from "cmdk";
 import {
+  HistoryIcon,
   LayersIcon,
   LineChartIcon,
   SearchIcon,
+  SendIcon,
   SettingsIcon,
   UsersRoundIcon,
 } from "lucide-react";
@@ -16,11 +18,14 @@ import { useUiStore } from "@/stores/ui-store";
 
 import { cn } from "@/lib/utils";
 
+// サイドバー (dashboard-shell の nav) と同じ全ルートを網羅する。
 const links = [
-  { label: "Dashboard", href: "/", icon: LineChartIcon },
-  { label: "Sources", href: "/sources", icon: LayersIcon },
+  { label: "Overview", href: "/", icon: LineChartIcon },
   { label: "Jobs", href: "/jobs", icon: SearchIcon },
   { label: "Client analysis", href: "/clients", icon: UsersRoundIcon },
+  { label: "Sources", href: "/sources", icon: LayersIcon },
+  { label: "Scrape history", href: "/history", icon: HistoryIcon },
+  { label: "Discord delivery", href: "/discord", icon: SendIcon },
   { label: "Settings", href: "/settings", icon: SettingsIcon },
 ];
 

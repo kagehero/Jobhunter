@@ -57,6 +57,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { EmptyState } from "@/components/ui/empty-state";
 import { motion } from "framer-motion";
 
 import { ClientExtrasInline, LancersClientFeedbackStrip, parseLancersFeedbackCounts, stripLancersFeedbackPhrases } from "@/components/client-extras-inline";
@@ -1782,16 +1783,21 @@ function JobsPageInner() {
                     );
                   })}
                   {total === 0 ? (
-                    <TableRow>
+                    <TableRow className="hover:bg-transparent">
                       <TableCell colSpan={11}>
-                        <div className="flex flex-col items-center gap-2 py-14 text-center">
-                          <p className="font-medium text-zinc-900 dark:text-zinc-100">No jobs in this view</p>
-                          <p className="max-w-md text-sm text-zinc-500">
-                            Adjust filters or wait for{" "}
-                            <code className="rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-xs dark:bg-zinc-800">monitor.py</code>{" "}
-                            to ingest new postings. Rows only appear once a job has been detected at least once.
-                          </p>
-                        </div>
+                        <EmptyState
+                          icon={PackageIcon}
+                          title="No jobs in this view"
+                          description={
+                            <>
+                              フィルタを調整するか、{" "}
+                              <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[11px] dark:bg-zinc-800">
+                                monitor.py
+                              </code>{" "}
+                              が新しい案件を取り込むのをお待ちください。案件は一度検出されると表示されます。
+                            </>
+                          }
+                        />
                       </TableCell>
                     </TableRow>
                   ) : null}
